@@ -5,7 +5,7 @@
 import torch
 import ttnn
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoModelForCausalLM
 
 from loguru import logger
 from models.experimental.phi3_mini.tt.phi3_mini_mlp import TtPhi3MiniMLP
@@ -17,14 +17,17 @@ from models.utility_functions import (
 )
 
 
-def test_phi3_mini_mlp(device):
+def test_phi3_mini_mlp(device=None):
+    if device == None:
+        device = ttnn.GetDefaultDevice()
     torch.manual_seed(1234)
 
     SELF_MLP_LAYER_INDEX = 0
-    model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct")
+    model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
+    base_address = f"model.layers.{SELF_MLP_LAYER_INDEX}.mlp"
 
     # Torch phi3-mini mlp layer
-    torch_model = model.model.layer[SELF_MLP_LAYER_INDEX].mlp
+    torch_model = model.model.layers[SELF_MLP_LAYER_INDEX].mlp
 
     # Tt phi3-mini mlp layer
     tt_model = TtPhi3MiniMLP(
