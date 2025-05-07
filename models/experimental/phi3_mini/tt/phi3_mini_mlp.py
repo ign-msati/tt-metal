@@ -43,7 +43,7 @@ class TtPhi3MiniMLP(LightweightModule):
 
     def forward(self, hidden_states: ttnn.Tensor) -> ttnn.Tensor:
         up_states = self.gate_up_proj(hidden_states)
-        gate, up_states = _get_chunks(up_states, 2, num_features=self.input_dim)
+        gate, up_states = _get_chunks(up_states, 2, num_features=2 * self.hidden_dim)
 
         up_states = up_states * ttnn.silu(gate)
 

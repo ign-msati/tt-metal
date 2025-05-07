@@ -38,7 +38,7 @@ def test_phi3_mini_mlp(device=None):
     )
 
     # Run torch model
-    hidden_states = torch.rand(1, 43, 768)
+    hidden_states = torch.rand(1, 2, 3072)
     torch_output = torch_model(hidden_states)
 
     # Run tt model
