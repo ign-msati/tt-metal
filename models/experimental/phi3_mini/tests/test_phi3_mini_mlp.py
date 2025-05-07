@@ -9,18 +9,16 @@ from transformers import AutoModelForCausalLM
 
 from loguru import logger
 from models.experimental.phi3_mini.tt.phi3_mini_mlp import TtPhi3MiniMLP
+from tests.ttnn.utils_for_testing import assert_with_pcc
 
-from models.utility_functions import (
-    tt2torch_tensor,
-    comp_allclose,
-    comp_pcc,
-)
+from models.utility_functions import comp_allclose
 
 
-def test_phi3_mini_mlp(device=None):
+def test_phi3_mini_mlp(batch: int = 2, seq_len: int = 3072, device=None):
     if device == None:
-        device = ttnn.GetDefaultDevice()
+        device = ttnn.open_device(device_id=0)
     torch.manual_seed(1234)
+    expected_pcc_score = 0.98
 
     SELF_MLP_LAYER_INDEX = 0
     model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
@@ -38,7 +36,7 @@ def test_phi3_mini_mlp(device=None):
     )
 
     # Run torch model
-    hidden_states = torch.rand(1, 2, 3072)
+    hidden_states = torch.rand(1, batch, seq_len)
     torch_output = torch_model(hidden_states)
 
     # Run tt model
@@ -50,18 +48,15 @@ def test_phi3_mini_mlp(device=None):
     )
     tt_output = tt_model(tt_hidden_states)
 
-    # Compare outputs
-    tt_output_torch = tt2torch_tensor(tt_output[0])
-    tt_output_torch = tt_output_torch.squeeze(0)
+    does_pass, pcc_message = assert_with_pcc(
+        torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype), expected_pcc_score
+    )
 
-    does_pass, pcc_message = comp_pcc(torch_output[0], tt_output_torch, 0.98)
-
-    logger.info(comp_allclose(torch_output[0], tt_output_torch))
-    logger.info(pcc_message)
-
+    logger.info(comp_allclose(torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype)))
     if does_pass:
-        logger.info("RobertaAttention Passed!")
+        logger.success(f"Phi-3-mini MLP Passed! --> PCC: {pcc_message}")
     else:
-        logger.warning("RobertaAttention Failed!")
+        logger.warning(f"Phi-3-mini MLP Failed! --> PCC: {pcc_message}")
 
-    assert does_pass
+    # Close device
+    ttnn.close_device(device)
