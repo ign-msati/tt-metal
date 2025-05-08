@@ -10,17 +10,15 @@ from transformers import AutoModelForCausalLM
 from loguru import logger
 from models.experimental.phi3_mini.tt.phi3_mini_rope_scaled_rotary_emb import TtPhi3MiniLongRoPEScaledRotaryEmbedding
 
-from models.utility_functions import (
-    tt2torch_tensor,
-    comp_allclose,
-    comp_pcc,
-)
+from models.utility_functions import comp_allclose
+from tests.ttnn.utils_for_testing import assert_with_pcc
 
 
-def test_phi3_mini_rope_scaled_roatry_emb(device=None):
+def test_phi3_mini_rope_scaled_roatry_emb(seq_len: int = 384, device=None):
     if device == None:
-        device = ttnn.GetDefaultDevice()
+        device = ttnn.open_device(device_id=0)
     torch.manual_seed(0)
+    expected_pcc_score = 0.98
 
     model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
 
@@ -35,9 +33,8 @@ def test_phi3_mini_rope_scaled_roatry_emb(device=None):
     )
 
     # Run torch model
-    sequence_size = 384
-    torch_position_ids = torch.zeros((1, sequence_size), dtype=torch.bfloat16)
-    torch_value_states = torch.randint((1, sequence_size))
+    torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long)
+    torch_value_states = torch.randint((1, seq_len))
     torch_output = torch_model(torch_value_states, torch_position_ids)
 
     # Run tt model
@@ -55,18 +52,15 @@ def test_phi3_mini_rope_scaled_roatry_emb(device=None):
     )
     tt_output = tt_model(tt_value_states, tt_postion_ids)
 
-    # Compare outputs
-    tt_output_torch = tt2torch_tensor(tt_output[0])
-    tt_output_torch = tt_output_torch.squeeze(0)
+    does_pass, pcc_message = assert_with_pcc(
+        torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype), expected_pcc_score
+    )
 
-    does_pass, pcc_message = comp_pcc(torch_output[0], tt_output_torch, 0.98)
-
-    logger.info(comp_allclose(torch_output[0], tt_output_torch))
-    logger.info(pcc_message)
-
+    logger.info(comp_allclose(torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype)))
     if does_pass:
-        logger.info("RobertaAttention Passed!")
+        logger.success(f"Phi-3-mini RoPE Scaled Rotary Embedding Passed! --> PCC: {pcc_message}")
     else:
-        logger.warning("RobertaAttention Failed!")
+        logger.warning(f"Phi-3-mini RoPE Scaled Rotary Embedding Failed! --> PCC: {pcc_message}")
 
-    assert does_pass
+    # Close device
+    ttnn.close_device(device)
