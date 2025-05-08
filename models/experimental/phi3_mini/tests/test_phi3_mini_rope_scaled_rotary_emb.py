@@ -53,15 +53,23 @@ def test_phi3_mini_rope_scaled_roatry_emb(batches: int = 1, seq_len: int = 384, 
     )
     tt_output = tt_model(tt_value_states, tt_postion_ids, seq_len)
 
-    does_pass, pcc_message = assert_with_pcc(
-        torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype), expected_pcc_score
+    does_pass_cos, pcc_message_cos = assert_with_pcc(
+        torch_output[0], ttnn.to_torch(tt_output[0]).to(torch_output[0].dtype), expected_pcc_score
+    )
+    does_pass_sin, pcc_message_sin = assert_with_pcc(
+        torch_output[1], ttnn.to_torch(tt_output[1]).to(torch_output[1].dtype), expected_pcc_score
     )
 
-    logger.info(comp_allclose(torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype)))
-    if does_pass:
-        logger.success(f"Phi-3-mini RoPE Scaled Rotary Embedding Passed! --> PCC: {pcc_message}")
+    logger.info(comp_allclose(torch_output[0], ttnn.to_torch(tt_output[0]).to(torch_output[0].dtype)))
+    logger.info(comp_allclose(torch_output[1], ttnn.to_torch(tt_output[1]).to(torch_output[1].dtype)))
+    if does_pass_cos and does_pass_sin:
+        logger.success(
+            f"Phi-3-mini RoPE Scaled Rotary Embedding Passed! --> PCC_COS: {pcc_message_cos}, PCC_SIN: {pcc_message_sin}"
+        )
     else:
-        logger.warning(f"Phi-3-mini RoPE Scaled Rotary Embedding Failed! --> PCC: {pcc_message}")
+        logger.warning(
+            f"Phi-3-mini RoPE Scaled Rotary Embedding Failed! --> PCC_COS: {pcc_message_cos}, PCC_SIN: {pcc_message_sin}"
+        )
 
     # Close device
     ttnn.close_device(device)
