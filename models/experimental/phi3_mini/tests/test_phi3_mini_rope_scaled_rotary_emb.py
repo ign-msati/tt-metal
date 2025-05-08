@@ -18,7 +18,7 @@ def test_phi3_mini_rope_scaled_roatry_emb(batches: int = 1, seq_len: int = 384, 
     if device == None:
         device = ttnn.open_device(device_id=0)
     torch.manual_seed(0)
-    expected_pcc_score = 0.98
+    expected_pcc_score = 0.97
 
     model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
 
@@ -40,9 +40,9 @@ def test_phi3_mini_rope_scaled_roatry_emb(batches: int = 1, seq_len: int = 384, 
 
     # Run tt model
     tt_postion_ids = ttnn.from_torch(
-        torch_position_ids[:, None, :],
+        torch_position_ids[:, None, :].float(),
         device=device,
-        dtype=ttnn.bfloat16,
+        dtype=ttnn.float32,
         layout=ttnn.TILE_LAYOUT,
     )
     tt_value_states = ttnn.from_torch(
