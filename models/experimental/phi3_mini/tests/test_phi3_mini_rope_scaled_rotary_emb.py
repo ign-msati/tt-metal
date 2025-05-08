@@ -14,7 +14,7 @@ from models.utility_functions import comp_allclose
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 
-def test_phi3_mini_rope_scaled_roatry_emb(seq_len: int = 384, device=None):
+def test_phi3_mini_rope_scaled_roatry_emb(batches: int = 1, seq_len: int = 384, device=None):
     if device == None:
         device = ttnn.open_device(device_id=0)
     torch.manual_seed(0)
@@ -25,21 +25,22 @@ def test_phi3_mini_rope_scaled_roatry_emb(seq_len: int = 384, device=None):
     # Torch phi3-mini RoPE layer
     torch_model = model.model.layers[0].self_attn.rotary_emb
 
+    rotary_dim = model.config.hidden_size // model.config.num_attention_heads
     # Tt phi3-mini mlp layer
     tt_model = TtPhi3MiniLongRoPEScaledRotaryEmbedding(
-        dim=None,
+        dim=rotary_dim,
         config=model.config,
         device=device,
     )
 
     # Run torch model
-    torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long)
-    torch_value_states = torch.randint((1, seq_len))
+    torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0)
+    torch_value_states = torch.arange(0, seq_len, 1, dtype=torch.long)
     torch_output = torch_model(torch_value_states, torch_position_ids)
 
     # Run tt model
     tt_postion_ids = ttnn.from_torch(
-        torch_position_ids,
+        torch_position_ids[:, None, :],
         device=device,
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
@@ -50,7 +51,7 @@ def test_phi3_mini_rope_scaled_roatry_emb(seq_len: int = 384, device=None):
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
     )
-    tt_output = tt_model(tt_value_states, tt_postion_ids)
+    tt_output = tt_model(tt_value_states, tt_postion_ids, seq_len)
 
     does_pass, pcc_message = assert_with_pcc(
         torch_output, ttnn.to_torch(tt_output[0]).to(torch_output.dtype), expected_pcc_score
