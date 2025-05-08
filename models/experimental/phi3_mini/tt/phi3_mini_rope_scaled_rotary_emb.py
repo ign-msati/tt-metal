@@ -29,19 +29,22 @@ class TtPhi3MiniLongRoPEScaledRotaryEmbedding(TtPhi3MiniRotaryEmbedding):
         # position_ids_expanded = position_ids[:, None, :] # Our assumption about the shape of position id seems to be wrong
         if seq_len > self.original_max_position_embeddings:
             self.inv_freq_long_expanded = ttnn.from_torch(
-                self.inv_freq_long[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+                self.inv_freq_long[None, :, None].float().expand(position_ids.shape[0], -1, 1),
+                device=self.device,
+                layout=ttnn.TILE_LAYOUT,
             )
-            freqs = ttnn.matmul(self.inv_freq_long_expanded[: len(position_ids)], position_ids)
+            freqs = ttnn.matmul(self.inv_freq_long_expanded, position_ids)
             ttnn.deallocate(self.inv_freq_long_expanded)
         else:
             self.inv_freq_short_expanded = ttnn.from_torch(
-                self.inv_freq_short[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+                self.inv_freq_short[None, :, None].float().expand(position_ids.shape[0], -1, 1),
+                device=self.device,
+                layout=ttnn.TILE_LAYOUT,
             )
-            freqs = ttnn.matmul(self.inv_freq_short_expanded[: len(position_ids)], position_ids)
+            freqs = ttnn.matmul(self.inv_freq_short_expanded, position_ids)
             ttnn.deallocate(self.inv_freq_short_expanded)
 
         freqs = ttnn.transpose(freqs, 1, 2)
-
         emb = ttnn.concat([freqs, freqs], dim=-1)
 
         ttnn.deallocate(freqs)
@@ -52,8 +55,8 @@ class TtPhi3MiniLongRoPEScaledRotaryEmbedding(TtPhi3MiniRotaryEmbedding):
         else:
             scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.original_max_position_embeddings))
 
-        self.cos = emb.cos() * scaling_factor
-        self.sin = emb.sin() * scaling_factor
+        self.cos = ttnn.cos(emb) * scaling_factor
+        self.sin = ttnn.sin(emb) * scaling_factor
 
         ttnn.deallocate(emb)
 
