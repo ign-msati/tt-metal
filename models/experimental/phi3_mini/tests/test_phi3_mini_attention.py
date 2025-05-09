@@ -4,6 +4,7 @@
 
 import torch
 import ttnn
+import time
 
 from loguru import logger
 
@@ -13,7 +14,7 @@ from transformers import AutoModelForCausalLM
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 
-def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, device=None):
+def test_phi3_mini_attention_inference(batch: int = 1, query_len: int = 128, device=None):
     if device == None:
         device = ttnn.open_device(device_id=0)
     torch.manual_seed(42)
@@ -37,9 +38,8 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, devic
     )
 
     # Run torch model
-    torch_hidden_states = torch.rand(batch, seq_len, 3072)
-    # torch_hidden_states = torch.rand(1, batch, seq_len)
-    torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0).repeat(batch, 1)
+    torch_hidden_states = torch.rand(batch, query_len, model.config.hidden_size)
+    torch_position_ids = torch.arange(0, query_len, 1, dtype=torch.long).unsqueeze(0).repeat(batch, 1)
     torch_output = torch_model(torch_hidden_states, position_ids=torch_position_ids)
 
     # Run tt model
@@ -49,13 +49,16 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, devic
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
     )
-    tt_postion_ids = ttnn.from_torch(
-        torch_position_ids[:, None, :].float(),
-        device=device,
-        dtype=ttnn.float32,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    tt_postion_ids = torch_position_ids
+    # tt_postion_ids = ttnn.from_torch(
+    #     torch_position_ids[:, None, :].float(),
+    #     device=device,
+    #     dtype=ttnn.float32,
+    #     layout=ttnn.TILE_LAYOUT,
+    # )
+    start = time.perf_counter()
     tt_output = tt_model(tt_hidden_states, position_ids=tt_postion_ids)
+    print(f"Elapsed time: {time.perf_counter() - start}")
 
     does_pass, pcc_message = assert_with_pcc(
         torch_output[0], ttnn.to_torch(tt_output[0][0]).to(torch_output[0].dtype), expected_pcc_score
