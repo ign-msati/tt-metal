@@ -63,16 +63,17 @@ class TtPhi3MiniDecoder(LightweightModule):
 
 
         hidden_states = self.attention(hidden_states, position_ids=position_ids)
-
-        # hidden_states = residual + hidden_states 
+        # print("hdhape___________",hidden_states[0].shape)
+        # print("residualhdhape___________",residual.shape)
+        hidden_states = residual + hidden_states[0] 
 
         residual = hidden_states
 
-        # hidden_states = ttnn.rms_norm(hidden_states, epsilon=self.variance_epsilon, weight=self.post_attention_layernorm)
+        hidden_states = ttnn.rms_norm(hidden_states, epsilon=self.variance_epsilon, weight=self.post_attention_layernorm)
 
         hidden_states = self.feed_forward(hidden_states)
 
-        # # hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states
         return hidden_states
 
         # ttnn.rms_norm(hidden_states, epsilon=self.variance_epsilon, weight=self.weight)

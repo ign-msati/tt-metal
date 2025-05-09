@@ -78,10 +78,12 @@ def test_phi3_mini_decoder_inference(device=None):
     logger.info(comp_allclose(torch_output[0], tt_output_torch))
     logger.info(pcc_message)
 
+
     if does_pass:
-        logger.info("phi3decoder Passed!")
+        logger.success(f"Phi-3-mini Decoder Passed! --> PCC: {pcc_message}")
     else:
-        logger.warning("phi3decoder Failed!")
+        logger.warning(f"Phi-3-mini Decoder Failed! --> PCC: {pcc_message}")
+
 
     assert does_pass
     # Close device
