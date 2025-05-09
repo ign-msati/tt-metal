@@ -4,6 +4,7 @@
 
 from typing import Optional, Tuple
 
+import torch
 import ttnn
 import math
 
@@ -12,6 +13,69 @@ from models.helper_funcs import Linear
 from models.utility_functions import pad_by_zero
 from models.experimental.phi3_mini.tt.phi3_mini_rope_scaled_rotary_emb import TtPhi3MiniLongRoPEScaledRotaryEmbedding
 from models.experimental.phi3_mini.tt.phi3_mini_rotary_embedding import TtPhi3MiniRotaryEmbedding
+from models.experimental.phi3_mini.reference.rope import Phi3LongRoPEScaledRotaryEmbedding
+
+
+# Copied from transformers.models.llama.modeling_llama.rotate_half
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+# Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+def fall_back_torch_rope(query_states, key_states, rope_scale, position_ids, device):
+    query_states = ttnn.to_torch(query_states)
+    key_states = ttnn.to_torch(key_states)
+
+    cos, sin = rope_scale(position_ids, seq_len=None)
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+    query_states = ttnn.from_torch(
+        query_states,
+        device=device,
+        mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    key_states = ttnn.from_torch(
+        key_states,
+        device=device,
+        mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    return query_states, key_states
 
 
 class TtPhi3MiniAttention(LightweightModule):
@@ -60,6 +124,8 @@ class TtPhi3MiniAttention(LightweightModule):
         )
 
         self._init_rope()
+        rotary_dim = config.hidden_size // config.num_attention_heads
+        self.torch_rope_scale = Phi3LongRoPEScaledRotaryEmbedding(rotary_dim, config)
 
     def _init_rope(self):
         if self.rope_scaling is None:
@@ -80,7 +146,7 @@ class TtPhi3MiniAttention(LightweightModule):
         self,
         hidden_states: ttnn.Tensor,
         attention_mask: Optional[ttnn.Tensor] = None,
-        position_ids: Optional[ttnn.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_value: Optional[ttnn.Tensor] = None,
         output_attentions: bool = True,
         use_cache: bool = False,
@@ -101,38 +167,16 @@ class TtPhi3MiniAttention(LightweightModule):
         key_states = ttnn.transpose(key_states, 1, 2)
         value_states = ttnn.transpose(value_states, 1, 2)
 
-        # kv_seq_len = key_states.shape[-2]
-        # if past_key_value is not None:
-        #     pass
-
-        # cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
-
-        # print(f"qkv: {qkv.shape}")
-        # print(f"cos: {cos.shape}")
-        # print(f"sin: {sin.shape}")
-        # print(f"query_states: {query_states.shape}")
-        # print(f"value_states: {value_states.shape}")
-
-        # cos = ttnn.pad(cos, padding=((0, 0), (0, 0), (0, 32)), value=0)
-        # sin = ttnn.pad(sin, padding=((0, 0), (0, 0), (0, 32)), value=0)
-        # query_states = ttnn.pad(query_states, padding=((0, 0), (0, 0), (0, 0), (0, 32)), value=0)
-        # value_states = ttnn.pad(value_states, padding=((0, 0), (0, 0), (0, 0), (0, 32)), value=0)
-
-        # print(f"cos: {cos.shape}")
-        # print(f"sin: {sin.shape}")
-        # print(f"query_states: {query_states.shape}")
-        # print(f"value_states: {value_states.shape}")
-
-        # # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-        # query_states = ttnn.experimental.rotary_embedding(query_states, cos, sin)
-        # key_states = ttnn.experimental.rotary_embedding(key_states, cos, sin)
-
+        kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             pass
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        # key_states = repeat_kv(key_states, self.num_key_value_groups) num_key_value_groups = 1
-        # value_states = repeat_kv(value_states, self.num_key_value_groups) num_key_value_groups = 1
+        query_states, key_states = fall_back_torch_rope(
+            query_states, key_states, self.torch_rope_scale, position_ids, self.device
+        )
+
+        if past_key_value is not None:
+            pass
 
         key_states = ttnn.transpose(key_states, 2, 3)
 
