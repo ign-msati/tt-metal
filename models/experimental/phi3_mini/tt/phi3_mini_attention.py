@@ -146,10 +146,11 @@ class TtPhi3MiniAttention(LightweightModule):
         self,
         hidden_states: ttnn.Tensor,
         attention_mask: Optional[ttnn.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[ttnn.Tensor | torch.Tensor] = None,
         past_key_value: Optional[ttnn.Tensor] = None,
         output_attentions: bool = True,
         use_cache: bool = False,
+        fall_back_to_torch: bool = False,
     ) -> Tuple[ttnn.Tensor, Optional[ttnn.Tensor], Optional[Tuple[ttnn.Tensor]]]:
         bsz, q_len, _ = hidden_states.shape
 
@@ -171,16 +172,32 @@ class TtPhi3MiniAttention(LightweightModule):
         if past_key_value is not None:
             pass
 
-        query_states, key_states = fall_back_torch_rope(
-            query_states, key_states, self.torch_rope_scale, position_ids, self.device
-        )
+        if fall_back_to_torch:
+            query_states, key_states = fall_back_torch_rope(
+                query_states, key_states, self.torch_rope_scale, position_ids, self.device
+            )
+        else:
+            cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
+            cos = ttnn.unsqueeze(cos, 1)
+            sin = ttnn.unsqueeze(sin, 1)
+
+            neg_half = (-1) * query_states[..., query_states.shape[-1] // 2 :]
+            pos_half = query_states[..., : query_states.shape[-1] // 2]
+            rotated_query_states = ttnn.concat([neg_half, pos_half], dim=-1)
+
+            neg_half = (-1) * key_states[..., key_states.shape[-1] // 2 :]
+            pos_half = key_states[..., : key_states.shape[-1] // 2]
+            rotated_key_states = ttnn.concat([neg_half, pos_half], dim=-1)
+
+            query_states = (query_states * cos) + (rotated_query_states * sin)
+            key_states = (key_states * cos) + (rotated_key_states * sin)
 
         if past_key_value is not None:
             pass
 
         key_states = ttnn.transpose(key_states, 2, 3)
 
-        attn_weights = ttnn.matmul(query_states, key_states)
+        attn_weights = ttnn.matmul(query_states, key_states, dtype=ttnn.bfloat16)
         attn_weights = attn_weights * (1.0 / math.sqrt(self.head_dim))
 
         if attention_mask is not None:
