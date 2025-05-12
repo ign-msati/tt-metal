@@ -41,7 +41,8 @@ def test_phi3_mini_attention_inference():  # device):
     # hidden_states, tt_hidden_states = create_attention_input(mode, ttnn.bfloat16, batch, seq_len, config.hidden_size, ttnn_device)
     hidden_states = torch.rand(batch, seq_len, hidden_size)
     attention_mask = torch.ones(batch, 1, seq_len, seq_len, dtype=torch.bool).tril()
-    torch_position_ids = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
+    # torch_position_ids = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
+    torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0).repeat(batch, 1).float()
 
     torch_past_key_values = DynamicCache()
 
@@ -69,13 +70,13 @@ def test_phi3_mini_attention_inference():  # device):
         layer_idx=SELF_ATTN_LAYER_INDEX,
     )
 
-    tt_position_ids = ttnn.from_torch(
-        torch_position_ids,
-        dtype=ttnn.bfloat16,
-        device=ttnn_device,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
+    # tt_position_ids = ttnn.from_torch(
+    #     torch_position_ids,
+    #     dtype=ttnn.bfloat16,
+    #     device=ttnn_device,
+    #     layout=ttnn.TILE_LAYOUT,
+    #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    # )
 
     tt_hidden_states = ttnn.from_torch(
         hidden_states,
@@ -106,7 +107,8 @@ def test_phi3_mini_attention_inference():  # device):
     tt_output, tt_layer_present = tt_model(
         tt_hidden_states,
         attention_mask=tt_attention_mask,
-        position_ids=tt_position_ids,
+        # position_ids=tt_position_ids,
+        position_ids=torch_position_ids,
         past_key_values=None,
         use_cache=True,
     )
