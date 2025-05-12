@@ -34,8 +34,8 @@ from models.common.lightweightmodule import LightweightModule
 
 # from models.experimental.phi_15.tt.phi_rotary_embedding import PhiRotaryEmbedding
 from models.experimental.phi3_mini.tt.phi3_mini_rope_scaled_rotary_emb import TtPhi3MiniLongRoPEScaledRotaryEmbedding
-
-
+from models.experimental.phi3_mini.tt.phi3_mini_attention import fall_back_torch_rope
+from models.experimental.phi3_mini.reference.rope import Phi3LongRoPEScaledRotaryEmbedding
 class TtPhi3MiniAttention(LightweightModule):
     def __init__(self, device, config, parameters, layer_idx):
         super().__init__()
@@ -62,7 +62,10 @@ class TtPhi3MiniAttention(LightweightModule):
         self.is_causal = True
         # self.dense_bias = ttnn.to_device(parameters.dense.bias, device, ttnn.L1_MEMORY_CONFIG)
         # self.rotary_embedding = TtPhi3MiniLongRoPEScaledRotaryEmbedding(self.head_dim,device, config)
+        rotary_dim = config.hidden_size // config.num_attention_heads
+        self.torch_rope_scale = Phi3LongRoPEScaledRotaryEmbedding(rotary_dim, config)
         self.layer_idx = layer_idx
+        self.device=device
 
     def forward(
         self,
@@ -71,6 +74,7 @@ class TtPhi3MiniAttention(LightweightModule):
         position_ids: ttnn.Tensor,
         past_key_values: ttnn.Tensor,
         use_cache: bool = False,
+        fall_back_to_torch=True
     ):
         batch, seq_len, hidden_size = hidden_states.shape
 
@@ -99,7 +103,11 @@ class TtPhi3MiniAttention(LightweightModule):
             num_heads=self.num_heads,
         )
         ttnn.deallocate(fused_qkv_output)
-
+        # fall_back_to_torch=True
+        if fall_back_to_torch:
+            query, key = fall_back_torch_rope(
+                query, key, self.torch_rope_scale, position_ids, self.device
+            )
         # # query = self.rotary_embedding(query)
         # # key = self.rotary_embedding(key)
         key = ttnn.transpose(key, 2, 3)
