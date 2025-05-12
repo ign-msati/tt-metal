@@ -17,7 +17,7 @@ import sys
 from models.experimental.phi3_mini.tt.dump_data import dump_np_array
 import time
 
-def test_phi3_mini_attention_inference():  # device):
+def test_phi3_mini_attention_inference(fall_back_to_torch=True):  # device):
     torch.manual_seed(1234)
     ttnn_device = ttnn.open_device(device_id=0)
     ###########################################################333
@@ -93,24 +93,33 @@ def test_phi3_mini_attention_inference():  # device):
         layout=ttnn.TILE_LAYOUT,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
-
-    tt_position_ids = ttnn.from_torch(
-        torch_position_ids,
-        dtype=ttnn.bfloat16,
-        device=ttnn_device,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
+    if fall_back_to_torch:
+        tt_postion_ids = torch_position_ids
+    else:
+        tt_postion_ids = ttnn.from_torch(
+            torch_position_ids,
+            device=ttnn.device,
+            dtype=ttnn.float32,
+            layout=ttnn.TILE_LAYOUT,
+        )
+    # tt_position_ids = ttnn.from_torch(
+    #     torch_position_ids,
+    #     dtype=ttnn.bfloat16,
+    #     device=ttnn_device,
+    #     layout=ttnn.TILE_LAYOUT,
+    #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    # )
 
     # TTNN attention prefill
     start = time.time()
     tt_output, tt_layer_present = tt_model(
         tt_hidden_states,
         attention_mask=tt_attention_mask,
-        # position_ids=tt_position_ids,
-        position_ids=torch_position_ids,
+        position_ids=tt_postion_ids,
+        # position_ids=torch_position_ids,
         past_key_values=None,
         use_cache=True,
+        fall_back_to_torch=fall_back_to_torch
     )
     end = time.time()
     duration = end - start
