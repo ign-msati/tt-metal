@@ -37,10 +37,6 @@ class TtPhi3MiniDecoderLayer(LightweightModule):
             )
             self.layers.append(decoder_layers)
 
-       
-    """
-    """
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -54,4 +50,4 @@ class TtPhi3MiniDecoderLayer(LightweightModule):
             tt_output_states = layer(tt_output_states, position_ids=position_ids)
             tt_output_states=tt_output_states[0]
 
-        return hidden_states
+        return tt_output_states

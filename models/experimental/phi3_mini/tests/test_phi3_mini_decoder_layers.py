@@ -24,7 +24,7 @@ def test_phi3_mini_Decode_layer_inference(device=None):
     seq_len=3
     batch=1
     fall_back_to_torch=False
-    LAYER_INDEX_SPLIT = 8
+    LAYER_INDEX_SPLIT = 15
     # base_address = f"model.layers.{LAYER_INDEX}"
 
     model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)

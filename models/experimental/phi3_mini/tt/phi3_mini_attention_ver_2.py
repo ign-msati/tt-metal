@@ -6,32 +6,6 @@
 import ttnn
 
 from models.common.lightweightmodule import LightweightModule
-
-
-# class TtPhi3MiniAttention(LightweightModule):
-#     def __init__(self, config, state_dict, base_address, device, layer_idx):
-#         super().__init__()
-#         pass
-
-#     """
-#     """
-
-#     def forward(
-#         self,
-#         hidden_states: torch.Tensor,
-#         attention_mask: Optional[torch.Tensor] = None,
-#         position_ids: Optional[torch.LongTensor] = None,
-#         past_key_value: Optional[Cache] = None,
-#         output_attentions: bool = False,
-#         use_cache: bool = False,
-#     ) -> Tuple[ttnn.Tensor]:
-#         pass
-
-
-#####################3
-import ttnn
-from models.common.lightweightmodule import LightweightModule
-
 # from models.experimental.phi_15.tt.phi_rotary_embedding import PhiRotaryEmbedding
 from models.experimental.phi3_mini.tt.phi3_mini_rope_scaled_rotary_emb import TtPhi3MiniLongRoPEScaledRotaryEmbedding
 from models.experimental.phi3_mini.tt.phi3_mini_attention import fall_back_torch_rope
@@ -67,6 +41,8 @@ class TtPhi3MiniAttention(LightweightModule):
         self.layer_idx = layer_idx
         self.device=device
 
+
+  # Optimized multihead attention https://docs.tenstorrent.com/tt-metal/latest/ttnn/ttnn/tutorials/ttnn_tutorials/003.html
     def forward(
         self,
         hidden_states: ttnn.Tensor,
@@ -74,7 +50,7 @@ class TtPhi3MiniAttention(LightweightModule):
         position_ids: ttnn.Tensor,
         past_key_values: ttnn.Tensor,
         use_cache: bool = False,
-        fall_back_to_torch=True
+        fall_back_to_torch:bool=False
     ):
         batch, seq_len, hidden_size = hidden_states.shape
 
@@ -89,6 +65,7 @@ class TtPhi3MiniAttention(LightweightModule):
             # bias=False,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=ttnn.bfloat8_b,
+            # dtype=ttnn.ttnn.bfloat16,
             core_grid=ttnn.CoreGrid(y=batch, x=12),
         )
         # return fused_qkv_output
@@ -104,10 +81,40 @@ class TtPhi3MiniAttention(LightweightModule):
         )
         ttnn.deallocate(fused_qkv_output)
         # fall_back_to_torch=True
+        kv_seq_len = key.shape[-2]
+        # if fall_back_to_torch:
+        #     query, key = fall_back_torch_rope(
+        #         query, key, self.torch_rope_scale, position_ids, self.device
+        #     )
+
+        ######################33
         if fall_back_to_torch:
             query, key = fall_back_torch_rope(
                 query, key, self.torch_rope_scale, position_ids, self.device
             )
+        else:
+            cos, sin = self.rotary_emb(value, position_ids, seq_len=kv_seq_len)
+            cos = ttnn.unsqueeze(cos, 1)
+            sin = ttnn.unsqueeze(sin, 1)
+
+            neg_half = (-1) * query[..., query.shape[-1] // 2 :]
+            pos_half = query[..., : query.shape[-1] // 2]
+            rotated_query_states = ttnn.concat([neg_half, pos_half], dim=-1)
+
+            neg_half = (-1) * key[..., key.shape[-1] // 2 :]
+            pos_half = key[..., : key.shape[-1] // 2]
+            rotated_key_states = ttnn.concat([neg_half, pos_half], dim=-1)
+
+            query = (query * cos) + (rotated_query_states * sin)
+            key = (key * cos) + (rotated_key_states * sin)
+
+            ttnn.deallocate(cos)
+            ttnn.deallocate(sin)
+            ttnn.deallocate(neg_half)
+            ttnn.deallocate(pos_half)
+            ttnn.deallocate(rotated_query_states)
+            ttnn.deallocate(rotated_key_states)
+        ##############################
         # # query = self.rotary_embedding(query)
         # # key = self.rotary_embedding(key)
         key = ttnn.transpose(key, 2, 3)
@@ -131,6 +138,7 @@ class TtPhi3MiniAttention(LightweightModule):
             value,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=ttnn.bfloat8_b,
+            # dtype=ttnn.ttnn.bfloat16,
             core_grid=ttnn.CoreGrid(y=batch, x=12),
         )
         ttnn.deallocate(attention_probs)
