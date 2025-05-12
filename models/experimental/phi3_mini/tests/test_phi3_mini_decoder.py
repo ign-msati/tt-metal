@@ -67,7 +67,17 @@ def test_phi3_mini_decoder_inference(device=None):
     #     dtype=ttnn.bfloat16,
     #     layout=ttnn.TILE_LAYOUT,
     # )
-    tt_output = tt_model(tt_hidden_states, position_ids=torch_position_ids)
+    fall_back_to_torch=False
+    if fall_back_to_torch:
+        tt_postion_ids = torch_position_ids
+    else:
+        tt_postion_ids = ttnn.from_torch(
+            torch_position_ids,
+            device=device,
+            dtype=ttnn.float32,
+            layout=ttnn.TILE_LAYOUT,
+        )
+    tt_output = tt_model(tt_hidden_states, position_ids=tt_postion_ids)
 
     # Compare outputs
     tt_output_torch = tt2torch_tensor(tt_output[0])
