@@ -30,7 +30,8 @@ def test_phi3_mini_embedding_inference(device=None):
 
 
     tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-128k-instruct")
-    promt="even number after 2"
+    # promt="even number after 2"
+    promt="how to build the good model"
     sample_input_torch = tokenizer(promt,return_tensors="pt")
     sample_input_torch = (sample_input_torch["input_ids"],)[0]
     # sample_input_torch=torch.tensor([[  715, 29879,   925,   664]])
@@ -47,12 +48,13 @@ def test_phi3_mini_embedding_inference(device=None):
     )
 
     # Run tt model
-    sample_input_tt = ttnn.from_torch(
-        sample_input_torch,
-        device=device,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    # sample_input_tt = ttnn.from_torch(
+    #     sample_input_torch,
+    #     device=device,
+    #     dtype=ttnn.bfloat16,
+    #     layout=ttnn.TILE_LAYOUT,
+    # )
+    sample_input_tt = ttnn.to_device(ttnn.from_torch(sample_input_torch), device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
     tt_output = tt_model(sample_input_tt)
     ###############################################################
     # Compare outputs
