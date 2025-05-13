@@ -24,7 +24,7 @@ def test_phi3_mini_model_inference(device=None):
     # base_address = f"model.layers.{LAYER_INDEX}"
 
     model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-
+    model.eval()
     # Torch phi3-mini attn layer
     # torch_model = model.model.layers[LAYER_INDEX]
     torch_model = model
@@ -32,14 +32,17 @@ def test_phi3_mini_model_inference(device=None):
 
 
     hidden_size = 3072
-    seq_len=3
+    seq_len=4
     batch=1
     # hidden_states, tt_hidden_states = create_attention_input(mode, ttnn.bfloat16, batch, seq_len, config.hidden_size, ttnn_device)
-    torch_hidden_states = torch.rand(batch, seq_len, hidden_size)
+    # torch_hidden_states = torch.rand(batch, seq_len, hidden_size)
     attention_mask = torch.ones(batch, 1, seq_len, seq_len, dtype=torch.bool).tril()
     torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0).repeat(batch, 1)
-    torch_output = torch_model(torch_hidden_states, position_ids=torch_position_ids)
 
+    # torch_position_ids = torch_position_ids.unsqueeze(0).view(-1, seq_len)
+    sample_input_torch=torch.tensor([[  715, 29879,   925,   664]])
+    torch_output = torch_model(sample_input_torch)#, position_ids=torch_position_ids)
+    # print("torch output", torch_output[0].shape)
     # Tt phi3-mini attn layer
     tt_model = TtPhi3MiniModel(
         config=model.config,
@@ -47,15 +50,20 @@ def test_phi3_mini_model_inference(device=None):
         device=device,
         state_dict=model.state_dict(),
     )
-
     # # Run torch model
     # hidden_states = torch.rand(1, 32, 768)
     # attention_mask = torch.ones(1, 1, 32)
     # torch_output = torch_model(hidden_states, attention_mask=attention_mask)
 
-    # Run tt model
-    tt_hidden_states = ttnn.from_torch(
-        torch_hidden_states,
+    # # Run tt model
+    # tt_hidden_states = ttnn.from_torch(
+    #     torch_hidden_states,
+    #     device=device,
+    #     dtype=ttnn.bfloat16,
+    #     layout=ttnn.TILE_LAYOUT,
+    # )
+    sample_input_tt = ttnn.from_torch(
+        sample_input_torch,
         device=device,
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
@@ -66,11 +74,23 @@ def test_phi3_mini_model_inference(device=None):
     #     dtype=ttnn.bfloat16,
     #     layout=ttnn.TILE_LAYOUT,
     # )
-    tt_output = tt_model(tt_hidden_states, position_ids=torch_position_ids)
+    fall_back_to_torch=False
+    if fall_back_to_torch:
+        tt_postion_ids = torch_position_ids
+    else:
+        tt_postion_ids = ttnn.from_torch(
+            torch_position_ids,
+            device=device,
+            dtype=ttnn.float32,
+            layout=ttnn.TILE_LAYOUT,
+        )
+    tt_output = tt_model(sample_input_tt, position_ids=tt_postion_ids)
 
     # Compare outputs
     tt_output_torch = tt2torch_tensor(tt_output[0])
     tt_output_torch = tt_output_torch.squeeze(0)
+    # print("shapeeeeeeeeeeeeeee", torch_output[0].shape)
+    print("tt_output_torch.shape, torch_output.shape)",tt_output_torch.shape, torch_output[0].shape)
 
     does_pass, pcc_message = comp_pcc(torch_output[0], tt_output_torch, 0.98)
 

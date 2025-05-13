@@ -9,7 +9,7 @@ from models.utility_functions import pad_by_zero
 from models.common.lightweightmodule import LightweightModule
 from models.experimental.phi3_mini.tt.phi3_mini_attention import TtPhi3MiniAttention
 from models.experimental.phi3_mini.tt.phi3_mini_mlp import TtPhi3MiniMLP
-
+from models.helper_funcs import Linear
 from models.experimental.phi3_mini.tt.phi3_mini_decoder import TtPhi3MiniDecoder
 class TtPhi3MiniModel(LightweightModule):
     # def __init__(self, config, state_dict, base_address, device, layer_idx):
@@ -24,7 +24,7 @@ class TtPhi3MiniModel(LightweightModule):
         self.hidden_size =config.hidden_size
         self.n_layer = config.num_hidden_layers
         #####################################
-        self.embedding_tokens_weights = state_dict['model.embed_tokens.weight']
+        self.embedding_tokens_weights = pad_by_zero(state_dict['model.embed_tokens.weight'], device)[0]
         
         # self.n_decoder = self.n_layer
         self.layers = []
@@ -36,15 +36,27 @@ class TtPhi3MiniModel(LightweightModule):
                 config=config,
                 base_address=base_address,
                 device=device,
-                state_dict=state_dict(),
+                state_dict=state_dict,
                 layer_idx=LAYER_INDEX,
             )
             self.layers.append(decoder_layers)
 
-        self.final_layernorm_weights =state_dict['model.norm.weight']
-        self.lm_head_weights=state_dict['lm_head.weight']
+        # self.final_layernorm_weights =state_dict['model.norm.weight']
+        self.final_layernorm_weights = pad_by_zero(state_dict['model.norm.weight'], device)[0]
+        # self.lm_head_weights=state_dict['lm_head.weight']
+        # self.lm_head_weights= pad_by_zero(state_dict['lm_head.weight'], device)[0]
+        # self.lm_head_weights  = ttnn.transpose( self.lm_head_weights, -2, -1)
+        self.lm_head_weights= pad_by_zero(torch.transpose(state_dict['lm_head.weight'], -2, -1), device)[0]
+        # self.lm_head_weights  = ttnn.transpose( self.lm_head_weights, -2, -1)
 
         self.variance_epsilon=config.rms_norm_eps
+        # self.lm_head = Linear(
+        #     3072,
+        #     32064,
+        #     self.lm_head_weights,
+        #     None,
+        # )
+
         # if position_ids is None:
         #     device = input_ids.device if input_ids is not None else inputs_embeds.device
         #     position_ids = torch.arange(
@@ -65,12 +77,17 @@ class TtPhi3MiniModel(LightweightModule):
         # pass
         x = ttnn.embedding(inputs, self.embedding_tokens_weights)
 
+        # for layer in self.layers:
+        #     x = layer(x, position_ids=position_ids)
+
+        tt_output_states=x
+        # print("tt_output_statest_____",tt_output_states.shape)
         for layer in self.layers:
-            x = layer(x, position_ids=position_ids)
+            tt_output_states = layer(tt_output_states, position_ids=position_ids)
+            tt_output_states=tt_output_states[0]
 
         # x = ttnn.layer_norm(x, epsilon=1e-05, weight=self.final_layernorm_weights, bias=self.final_layernorm_bias)
-        x = ttnn.rms_norm(x, epsilon=self.variance_epsilon, weight=self.final_layernorm_weights)
+        x = ttnn.rms_norm(tt_output_states, epsilon=self.variance_epsilon, weight=self.final_layernorm_weights)
 
         x = ttnn.linear(x, self.lm_head_weights)
-
         return x
