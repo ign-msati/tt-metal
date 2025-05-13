@@ -106,8 +106,8 @@ class TtPhi3MiniAttention(LightweightModule):
         op_size = self.num_heads * self.head_dim + 2 * (self.num_key_value_heads * self.head_dim)
 
         # Get the weights
-        self.o_proj_weight = pad_by_zero(state_dict[f"{base_address}.o_proj.weight"], self.device)[0]
-        self.qkv_proj_weight = pad_by_zero(state_dict[f"{base_address}.qkv_proj.weight"], self.device)[0]
+        self.o_proj_weight = pad_by_zero(state_dict[f"{base_address}.o_proj.weight"], self.device, tt_dtype=ttnn.bfloat8_b)[0]
+        self.qkv_proj_weight = pad_by_zero(state_dict[f"{base_address}.qkv_proj.weight"], self.device, tt_dtype=ttnn.bfloat8_b)[0]
 
         # Setup Layers
         self.o_proj = Linear(
