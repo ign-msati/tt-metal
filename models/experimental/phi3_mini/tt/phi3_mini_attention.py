@@ -5,14 +5,12 @@ import ttnn
 import math
 
 from models.common.lightweightmodule import LightweightModule
-from models.experimental.phi3_mini.tt.phi3_mini_rope_scaled_rotary_emb import TtPhi3MiniLongRoPEScaledRotaryEmbedding
-from models.experimental.phi3_mini.tt.phi3_mini_rotary_embedding import TtPhi3MiniRotaryEmbedding
 
 import torch
 import ttnn
-from models.utility_functions import nearest_32
 from ttnn import ShardTensorToMesh, ReplicateTensorToMesh
 from models.experimental.grok.tt.grok_common import LightweightModule
+from models.experimental.phi3_mini_may.reference.rope import Phi3LongRoPEScaledRotaryEmbedding
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -54,8 +52,9 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 def fall_back_torch_rope(query_states, key_states, rope_scale, position_ids, device):
     query_states = ttnn.to_torch(query_states)
     key_states = ttnn.to_torch(key_states)
+    position = torch.LongTensor([[position_ids]])
 
-    cos, sin = rope_scale(position_ids, seq_len=None)
+    cos, sin = rope_scale(position, seq_len=None)
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     query_states = ttnn.from_torch(
@@ -64,7 +63,7 @@ def fall_back_torch_rope(query_states, key_states, rope_scale, position_ids, dev
         mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        memory_config=ttnn.L1_MEMORY_CONFIG,
     )
     key_states = ttnn.from_torch(
         key_states,
@@ -72,7 +71,7 @@ def fall_back_torch_rope(query_states, key_states, rope_scale, position_ids, dev
         mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        memory_config=ttnn.L1_MEMORY_CONFIG,
     )
     return query_states, key_states
 
@@ -85,7 +84,7 @@ class TtPhi3MiniAttention(LightweightModule):
         self.state_dict = state_dict
         self.mesh_device = device
         self.model_args = kernel_args
-
+        self.model_config = config
         self.hidden_size = config.hidden_size
         self.n_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
@@ -140,32 +139,32 @@ class TtPhi3MiniAttention(LightweightModule):
 
         cache_k = torch.zeros(  # 12582912000 * 1 bytes values -> 24GB :(
             (
-                self.n_kv_heads,
                 self.max_batch_size,
+                self.n_local_kv_heads,
                 self.max_seq_len,
                 self.head_dim,
             )
         )
         cache_v = torch.zeros(
             (
-                self.n_kv_heads,
                 self.max_batch_size,
+                self.n_local_kv_heads,
                 self.max_seq_len,
                 self.head_dim,
             )
         )
-        layer_past = [cache_k, cache_v]
+
         self.layer_past = [
             ttnn.as_tensor(
-                lp,
-                device=self.mesh_device,
-                mesh_mapper=ShardTensorToMesh(self.mesh_device, dim=0),
-                dtype=ttnn.bfloat8_b,
+                k_or_v,
+                dtype=ttnn.bfloat16,
+                # dtype=ttnn.bfloat8_b,
                 layout=self.model_mem_configs["ATTN_W_LAYOUT_TILE"],
-                memory_config=self.model_mem_configs["ATTN_CACHE_WEIGHTS_MEMCFG"],
-                # cache_file_name=cache_name(f"empty_attn_cache_{cache_k.shape}"),
+                device=self.mesh_device,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
             )
-            for lp in layer_past
+            for k_or_v in [cache_k, cache_v]
         ]
 
         self.compute_kernel = self.model_args.get_compute_kernel_config()
@@ -177,25 +176,11 @@ class TtPhi3MiniAttention(LightweightModule):
         # Will be filled during the initial warmup run
         self.q_mem_config = None
         self.k_mem_config = None
-
-    def _init_rope(self):
-        if self.rope_scaling is None:
-            self.rotary_emb = TtPhi3MiniRotaryEmbedding(
-                self.head_dim,
-                max_position_embeddings=self.max_position_embeddings,
-                base=self.rope_theta,
-                device=self.device,
-            )
-        else:
-            scaling_type = self.config.rope_scaling["type"]
-            if scaling_type == "longrope":
-                self.rotary_emb = TtPhi3MiniLongRoPEScaledRotaryEmbedding(self.head_dim, self.config, self.device)
-            else:
-                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+        self.rotary_emb = Phi3LongRoPEScaledRotaryEmbedding(self.head_dim, self.model_config)
 
     def forward(
         self,
-        hidden_states: ttnn.Tensor,
+        x: ttnn.Tensor,
         rot_mats,
         current_pos,
         attn_masks,
@@ -212,173 +197,147 @@ class TtPhi3MiniAttention(LightweightModule):
         D : head_dim (128)
         P : padded_layer_past_len
         """
-        padded_layer_past_len = min(nearest_32(current_pos + 1), self.max_seq_len)
-
-        x_11BH = hidden_states
+        x_11BH = x
         wo = self.wo
         layer_past = self.layer_past
         rot_mat = rot_mats[current_pos]
         attn_mask_1B4P = attn_masks
+        batch = x.shape[-2]
+
         ###
-        # QKV matmuls
+        # QKV Linear
         ###
 
-        xqkv_fused = ttnn.matmul(
-            x_11BH,
+        print(f"x: {x.shape}")
+
+        xqkv_fused = ttnn.linear(
+            x,
             self.wqkv,
-            dtype=ttnn.bfloat16,
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            # program_config=self.model_mem_configs["QKV_MM_OUTPUT_PROGCFG"],
-            compute_kernel_config=self.compute_kernel,
+            dtype=ttnn.bfloat16,
         )
+        ttnn.deallocate(x)
 
-        # split qkv into heads
+        print(f"xqkv_fused: {xqkv_fused.shape}")
+        # Reshape such that true unpadded batch is tracked in shape
+        fqkv_shape = xqkv_fused.shape
+        xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, batch, fqkv_shape[3]), (1, 1, 32, fqkv_shape[3]))
+        print(f"xqkv_fused: {xqkv_fused.shape}")
+
+        ###
+        # Reshape and rotary embeddings TODO: Scaled ROPE
+        ###
         (
-            q_heads_1B4D,
-            k_heads_1B1D,
-            v_heads_1B1D,
+            q_heads_1BQD,
+            k_heads_1BKD,
+            # q_heads_pre_rot_1BQD,
+            # k_heads_pre_rot_1BKD,
+            v_heads_1BKD,
         ) = ttnn.experimental.nlp_create_qkv_heads_decode(
             xqkv_fused,
             num_heads=self.n_local_heads,
             num_kv_heads=self.n_local_kv_heads,
-            memory_config=self.model_mem_configs["HEIGHT_SHARDED_MEMCFG"],
+            memory_config=ttnn.L1_MEMORY_CONFIG
+            # memory_config=ttnn.MemoryConfig(
+            #     ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1
+            # )
         )
-        xqkv_fused.deallocate(True)
-        # new_key_states = ttnn.to_torch(k_heads_1B1D, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))
 
-        ###
-        # Rotary embeddings
-        ###
-        if self.q_mem_config is None:
-            self.q_mem_config = q_heads_1B4D.memory_config()
-        if self.k_mem_config is None:
-            self.k_mem_config = k_heads_1B1D.memory_config()
+        query_pos = self.n_heads * self.head_dim
+        query_states = xqkv_fused[..., :query_pos]
+        # key_states = xqkv_fused[..., query_pos : query_pos + self.n_kv_heads * self.head_dim]
+        # value_states = xqkv_fused[..., query_pos + self.n_kv_heads * self.head_dim :]
 
-        q_heads_1B4D = ttnn.matmul(
-            q_heads_1B4D,
-            rot_mat,
-            # program_config=self.model_mem_configs["ROT_MAT_MM_PROGCFG"], # might be 96 from 3072 // 32 TODO: fix config file ~nv
-            memory_config=self.q_mem_config,
-            compute_kernel_config=self.model_mem_configs["ROT_MAT_COMPUTE_KERNEL_CONFIG"]
-            # [seqlen, bsz, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [seqlen, bsz, padd_heads, head_dim]
-        )
-        k_heads_1B1D = ttnn.matmul(
-            k_heads_1B1D,
-            rot_mat,
-            # program_config=self.model_mem_configs["ROT_MAT_MM_PROGCFG"],
-            memory_config=self.k_mem_config,
-            compute_kernel_config=self.model_mem_configs["ROT_MAT_COMPUTE_KERNEL_CONFIG"],
-        )
-        # rotmat_key_states = ttnn.to_torch(k_heads_1B1D, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))
-        # rotmat = ttnn.to_torch(rot_mat, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))[0]
+        q_heads_1BQD = ttnn.reshape(query_states, (batch, self.n_heads, 1, self.head_dim))
+        # k_heads_1BKD = ttnn.reshape(key_states, (1, batch, self.n_kv_heads, self.head_dim))
+        # v_heads_1BKD = ttnn.reshape(value_states, (1, batch, self.n_kv_heads, self.head_dim))
+
+        # ttnn.deallocate(key_states)
+        # ttnn.deallocate(value_states)
+        ttnn.deallocate(query_states)
+        ttnn.deallocate(xqkv_fused)
+        print(f"q_heads_1BQD: {q_heads_1BQD.shape}")
+        print(f"k_heads_1BKD: {k_heads_1BKD.shape}")
+        print(f"v_heads_1BKD: {v_heads_1BKD.shape}")
 
         ###
         # KV update
         ###
-        keys_1BPD = layer_past[0]
-        values_1BPD = layer_past[1]
-        # TODO: Findout what is wrong and add back in
-        # ttnn.kv_cache.update_cache_for_token_(keys_1BPD, k_heads_1B1D, current_pos)
-        # ttnn.kv_cache.update_cache_for_token_(values_1BPD, v_heads_1B1D, current_pos)
-        self.layer_past = [keys_1BPD, values_1BPD]
-        k_heads_1B1D.deallocate(True)
-        v_heads_1B1D.deallocate(True)
+        keys = self.layer_past[0]
+        values = self.layer_past[1]
 
-        # TODO: Cache fix
-        # keys_1BPD = ttnn.experimental.nlp_kv_cache_load_slice(
-        #     keys_1BPD, seq_len_start=0, seq_len_end=padded_layer_past_len
-        # )
+        print(f"keys: {keys.shape}")
+        print(f"values: {values.shape}")
 
-        # query_states = ttnn.to_torch(q_heads_1B4D, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=-2))
-        # key_states = ttnn.to_torch(keys_1BPD, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))
+        # k_heads, [seqlen, n_kv_heads, bsz, head_dim]
+        # v_heads [seqlen, n_kv_heads, bsz, head_dim]
+        # keys, [max_batch_size, n_kv_heads, max_seq_len, head_dim]
+        ttnn.experimental.paged_update_cache(keys, k_heads_1BKD, update_idxs=[current_pos] * batch)
+        ttnn.experimental.paged_update_cache(values, v_heads_1BKD, update_idxs=[current_pos] * batch)
+        # ttnn.update_cache(keys, k_heads_1BKD, current_pos)
+        # ttnn.update_cache(values, v_heads_1BKD, current_pos)
+        ttnn.deallocate(k_heads_1BKD)
+        ttnn.deallocate(v_heads_1BKD)
 
+        print(f"keys: {keys.shape}")
+        print(f"values: {values.shape}")
         ###
         # Attention
         ###
         # transpose keys
-        keys_1BDP = ttnn.transpose(
-            keys_1BPD,
-            -2,
-            -1,
-            memory_config=self.model_mem_configs["HEIGHT_SHARDED_MEMCFG"],
-        )
-        keys_1BPD.deallocate(True)
+        # TODO: Check if this is feasible
+        keys_BKD1 = ttnn.transpose(keys, 2, 3)
+        print(f"keys_BKD1: {keys_BKD1.shape}")
+        # q_heads_BQ1D = ttnn.reshape(q_heads_1BQD, (8, 32, 1, 96))
+        # ttnn.deallocate(q_heads_1BQD)
+        # print(f"q_heads_B1QD: {q_heads_B1QD.shape}")
+        # q_heads_BQ1D = ttnn.transpose(q_heads_B1QD, 1, 2)
+        # ttnn.deallocate(q_heads_B1QD)
+        # print(f"q_heads_BQ1D: {q_heads_BQ1D.shape}")
 
-        # scores matmul
-        attn_1B4P_memconfig = self.model_mem_configs["ATTN_BATCHED_MM_OUTPUT_MEMCFG"](padded_layer_past_len)
-        attn_1B4P = ttnn.matmul(
-            q_heads_1B4D,
-            keys_1BDP,
+        wattn_1BQS = ttnn.matmul(
+            q_heads_1BQD,
+            keys_BKD1,
             dtype=ttnn.bfloat16,
-            program_config=self.model_mem_configs["SCORES_BATCHED_MM_PROGCFG"](padded_layer_past_len // 32),
-            memory_config=attn_1B4P_memconfig,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             compute_kernel_config=self.compute_kernel_attn,
         )
-        q_heads_1B4D.deallocate(True)
-        keys_1BDP.deallocate(True)
+        ttnn.deallocate(q_heads_1BQD)
+        ttnn.deallocate(keys_BKD1)
 
-        # Softmax and scaling
-        # FIXME: Maintain sharded memory layout when #9773 is fixed
-        attn_1B4P = ttnn.sharded_to_interleaved(attn_1B4P, memory_config=ttnn.L1_MEMORY_CONFIG)
-        attn_1B4P = attn_1B4P * self.attn_output_multiplier
-        attn_1B4P = ttnn.interleaved_to_sharded(attn_1B4P, attn_1B4P_memconfig)
+        print(f"wattn_1BQS: {wattn_1BQS.shape}")
 
-        attn_1B4P = ttnn.scale_mask_softmax_in_place(
-            attn_1B4P,
-            1.0,
-            attn_mask_1B4P,
-            program_config=self.model_mem_configs["ATTN_BATCHED_SOFTMAX_PROGCFG"](padded_layer_past_len),
-            is_causal_mask=True,
-        )
-        # post_softmax = ttnn.to_torch(attn_1B4P, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=-2))[0]
+        wattn_1BQS = ttnn.mul(wattn_1BQS, self.attn_output_multiplier, memory_config=ttnn.L1_MEMORY_CONFIG)
+        if attn_mask_1B4P is not None:
+            wattn_1BQS = ttnn.add(
+                wattn_1BQS,
+                attn_mask_1B4P,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+            )
+        # wattn_1BQS = ttnn.scale_mask_softmax_in_place(wattn_1BQS)
+        wattn_1BQS = ttnn.softmax(wattn_1BQS, dim=-1)
 
-        # values matmul
-        values_1BPD = ttnn.experimental.nlp_kv_cache_load_slice(
-            values_1BPD, seq_len_start=0, seq_len_end=padded_layer_past_len
-        )
+        print(f"wattn_1BQS_softmax: {wattn_1BQS.shape}")
 
-        # value_states = ttnn.to_torch(values_1BPD, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))
-        # x = ttnn.to_torch(x_11BH, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))[0]
-        attn_output_1B4D = ttnn.matmul(
-            attn_1B4P,
-            values_1BPD,
+        attn_O = ttnn.matmul(
+            wattn_1BQS,
+            values,
             dtype=ttnn.bfloat16,
-            memory_config=self.model_mem_configs["SCORES_BATCHED_MM_OUTPUT_MEMCFG"],
-            program_config=self.model_mem_configs["VALUES_BATCHED_MM_PROGCFG"](padded_layer_past_len // 32),
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             compute_kernel_config=self.compute_kernel_attn,
         )
-        attn_1B4P.deallocate(True)
-        values_1BPD.deallocate(True)
 
-        # value_output = ttnn.to_torch(attn_output_1B4D, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))[0]
+        print(f"attn_O: {attn_O.shape}")
+        attn_O = ttnn.transpose(attn_O, 1, 2)
+        attn_O = ttnn.reshape(attn_O, (batch, 1, self.hidden_size))
 
-        attn_output_11BH = ttnn.experimental.nlp_concat_heads_decode(
-            attn_output_1B4D,
-            num_heads=6,
+        attn_O = ttnn.matmul(
+            attn_O,
+            self.wo,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            compute_kernel_config=self.compute_kernel_attn,
         )
-        attn_output_1B4D.deallocate(True)
+        print(f"attn_O: {attn_O.shape}")
 
-        attn_output_11BH = ttnn.sharded_to_interleaved(attn_output_11BH, memory_config=ttnn.L1_MEMORY_CONFIG)
-
-        ###
-        # Output matmul
-        ###
-        # All gather
-        dense_outputs_11BH_gathered = ttnn.all_gather(attn_output_11BH, dim=3, num_links=1)
-
-        # return the sum of the outputs
-        dense_outputs_11BH = ttnn.matmul(
-            dense_outputs_11BH_gathered,
-            wo,
-            memory_config=self.model_mem_configs["LM_HEAD_OUTPUT_MEMCFG"],
-            # compute_with_storage_grid_size=(8, 8),
-            program_config=self.model_mem_configs["LM_HEAD_OUTPUT_PROGCFG"],
-            compute_kernel_config=self.compute_kernel,
-            dtype=ttnn.bfloat8_b,
-        )
-
-        # attn_output = ttnn.to_torch(dense_outputs_11BH, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))[0]
-        # attn_mask = ttnn.to_torch(attn_mask_1B4P, mesh_composer=ConcatMeshToTensor(self.mesh_device, dim=0))[0]
-
-        dense_outputs_11BH_gathered.deallocate(True)
-        return dense_outputs_11BH
+        return attn_O
