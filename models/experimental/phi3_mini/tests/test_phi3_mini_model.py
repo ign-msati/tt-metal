@@ -39,9 +39,17 @@ def test_phi3_mini_model_inference(device=None):
     attention_mask = torch.ones(batch, 1, seq_len, seq_len, dtype=torch.bool).tril()
     torch_position_ids = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0).repeat(batch, 1)
 
+    ###########################################################33333
+    # position_ids = torch.arange(
+    #             0, seq_len , dtype=torch.long, device=device
+    #         )
+    # torch_position_ids = position_ids.unsqueeze(0).view(-1, seq_len)
+    #####################################################################
+
     # torch_position_ids = torch_position_ids.unsqueeze(0).view(-1, seq_len)
-    sample_input_torch=torch.tensor([[  715, 29879,   925,   664]])
+    sample_input_torch=torch.tensor([[715, 29879,   925,   664]])
     torch_output = torch_model(sample_input_torch)#, position_ids=torch_position_ids)
+    # torch_output = torch_model(sample_input_torch, position_ids=torch_position_ids)#, position_ids=torch_position_ids)
     # print("torch output", torch_output[0].shape)
     # Tt phi3-mini attn layer
     tt_model = TtPhi3MiniModel(
@@ -62,12 +70,13 @@ def test_phi3_mini_model_inference(device=None):
     #     dtype=ttnn.bfloat16,
     #     layout=ttnn.TILE_LAYOUT,
     # )
-    sample_input_tt = ttnn.from_torch(
-        sample_input_torch,
-        device=device,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    # sample_input_tt = ttnn.from_torch(
+    #     sample_input_torch,
+    #     device=device,
+    #     dtype=ttnn.bfloat16,
+    #     layout=ttnn.TILE_LAYOUT,
+    # )
+    sample_input_tt = ttnn.to_device(ttnn.from_torch(sample_input_torch), device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
     # tt_attention_mask = ttnn.from_torch(
     #     attention_mask,
     #     device=device,

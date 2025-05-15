@@ -49,7 +49,7 @@ class TtPhi3MiniDecoder(LightweightModule):
         self,
         hidden_states: torch.Tensor,
         # attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids:Optional[ttnn.Tensor | torch.Tensor] = None,
         # past_key_value: Optional[Cache] = None,
         # output_attentions: bool = False,
         # use_cache: bool = False,
@@ -57,7 +57,7 @@ class TtPhi3MiniDecoder(LightweightModule):
         ) -> Tuple[ttnn.Tensor]:
         # pass
         residual = hidden_states
-
+        print("residual shape ###################", residual.shape)
         # hidden_states = ttnn.layer_norm(hidden_states, self.layernorm_weights)
         hidden_states = ttnn.rms_norm(hidden_states, epsilon=self.variance_epsilon, weight=self.input_layernorm)
 
