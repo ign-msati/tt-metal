@@ -105,23 +105,32 @@ class TtPhi3MiniAttention(LightweightModule):
 
         op_size = self.num_heads * self.head_dim + 2 * (self.num_key_value_heads * self.head_dim)
 
-        # Get the weights
-        self.o_proj_weight = pad_by_zero(state_dict[f"{base_address}.o_proj.weight"], self.device, tt_dtype=ttnn.bfloat8_b)[0]
-        self.qkv_proj_weight = pad_by_zero(state_dict[f"{base_address}.qkv_proj.weight"], self.device, tt_dtype=ttnn.bfloat8_b)[0]
+        # # Get the weights
+        # self.o_proj_weight = pad_by_zero(state_dict[f"{base_address}.o_proj.weight"], self.device, tt_dtype=ttnn.bfloat8_b)[0]
+        # self.qkv_proj_weight = pad_by_zero(state_dict[f"{base_address}.qkv_proj.weight"], self.device, tt_dtype=ttnn.bfloat8_b)[0]
 
-        # Setup Layers
-        self.o_proj = Linear(
-            self.num_heads * self.head_dim,
-            self.hidden_size,
-            self.o_proj_weight,
-            None,
-        )
-        self.qkv_proj = Linear(
-            self.hidden_size,
-            op_size,
-            self.qkv_proj_weight,
-            None,
-        )
+        # Get the weights
+        # self.o_proj_weight = pad_by_zero(torch.transpose(state_dict[f"{base_address}.o_proj.weight"], -2, -1), self.device, tt_dtype=ttnn.bfloat8_b)[0]
+        # self.qkv_proj_weight = pad_by_zero(torch.transpose(state_dict[f"{base_address}.qkv_proj.weight"], -2, -1), self.device, tt_dtype=ttnn.bfloat8_b)[0]
+        # # # Get the weights
+        self.o_proj_weight = pad_by_zero(torch.transpose(state_dict[f"{base_address}.o_proj.weight"], -2, -1), self.device, tt_dtype=ttnn.bfloat16)[0]
+        self.qkv_proj_weight = pad_by_zero(torch.transpose(state_dict[f"{base_address}.qkv_proj.weight"], -2, -1), self.device, tt_dtype=ttnn.bfloat16)[0]
+
+
+        # self.lm_head_weights= pad_by_zero(torch.transpose(state_dict['lm_head.weight'], -2, -1), device)[0]
+        # # Setup Layers
+        # self.o_proj = Linear(
+        #     self.num_heads * self.head_dim,
+        #     self.hidden_size,
+        #     self.o_proj_weight,
+        #     None,
+        # )
+        # self.qkv_proj = Linear(
+        #     self.hidden_size,
+        #     op_size,
+        #     self.qkv_proj_weight,
+        #     None,
+        # )
 
         self._init_rope()
         rotary_dim = config.hidden_size // config.num_attention_heads
@@ -154,7 +163,9 @@ class TtPhi3MiniAttention(LightweightModule):
     ) -> Tuple[ttnn.Tensor, Optional[ttnn.Tensor], Optional[Tuple[ttnn.Tensor]]]:
         bsz, q_len, _ = hidden_states.shape
 
-        qkv = self.qkv_proj(hidden_states)
+        # qkv = self.qkv_proj(hidden_states)
+        # qkv = self.qkv_proj(hidden_states)
+        qkv = ttnn.linear(hidden_states, self.qkv_proj_weight)
         query_pos = self.num_heads * self.head_dim
         query_states = qkv[..., :query_pos]
         key_states = qkv[..., query_pos : query_pos + self.num_key_value_heads * self.head_dim]
@@ -211,7 +222,8 @@ class TtPhi3MiniAttention(LightweightModule):
         attn_output = ttnn.transpose(attn_output, 1, 2)
         attn_output = ttnn.reshape(attn_output, (bsz, q_len, self.hidden_size))
 
-        attn_output = self.o_proj(attn_output)
+        # attn_output = self.o_proj(attn_output)
+        attn_output = ttnn.linear(attn_output, self.o_proj_weight)
 
         if not output_attentions:
             attn_weights = None
