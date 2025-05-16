@@ -5,7 +5,7 @@ from loguru import logger
 
 from models.experimental.phi3_mini_may.tt.phi3_mini_attention import TtPhi3MiniAttention
 from models.utility_functions import comp_pcc, comp_allclose
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, DynamicCache
 from ttnn import ConcatMeshToTensor
 from models.experimental.grok.tt.grok_common import prepare_inputs_ttnn, prepare_rotation_mat_ttnn
 from models.experimental.phi3_mini_may.tt.model_config import TtPhi3MiniKernelConfigs
@@ -40,7 +40,7 @@ def prepare_inputs_ttnn(x_bsh, hidden_size, current_pos, mesh_device, max_seq_le
 
     # Attention mask
     padded_layer_past_len = nearest_32(current_pos + 1)
-    attn_mask = torch.zeros(seq_len, 1, 1, max_seq_len)  # [SB4P]
+    attn_mask = torch.zeros(batch, 1, seq_len, max_seq_len)  # [SB4P]
 
     # Fill mask with -inf outside the processed tokens
     attn_mask[:, :, :, current_pos + 1 :] = torch.finfo(attn_mask.dtype).min
@@ -63,10 +63,10 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
 
     expected_pcc_score = 0.1
     dtype = ttnn.bfloat8_b
-    batch = 1
+    batch = 8
     seq_len = 1  # length to generate
     generation_start_pos = 0  # Ref model can only start from pos 0
-    generation_length = 1
+    generation_length = 10
     ref_past_key_value = None
     all_tests_pass = True
 
@@ -75,6 +75,11 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
     base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
     state_dict = base_model.state_dict()
     model_config = base_model.config
+
+    head_dim = model_config.hidden_size // model_config.num_attention_heads
+    max_seq_len = model_config.max_position_embeddings // 128
+    # ref_past_key_value = StaticCache(config=model_config, max_batch_size=batch, max_cache_len=1)
+    ref_past_key_value = DynamicCache()
 
     # Torch phi3-mini attn layer
     reference_model = base_model.model.layers[SELF_ATTN_LAYER_INDEX].self_attn
@@ -90,8 +95,6 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
         kernel_args=kernel_args,
     )
 
-    head_dim = model_config.hidden_size // model_config.num_attention_heads
-    max_seq_len = model_config.max_position_embeddings // 128
     rot_mat = prepare_rotation_mat_ttnn(
         head_dim,
         max_seq_len,
@@ -99,7 +102,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
     )
 
     for i in range(generation_length):
-        pt_attention_input = (torch.rand(batch, seq_len, model_config.hidden_size) * 2) - 1
+        pt_attention_input = torch.rand(batch, seq_len, model_config.hidden_size)
         tt_attention_input = pt_attention_input
         current_pos = generation_start_pos + i
 

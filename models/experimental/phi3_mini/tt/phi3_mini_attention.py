@@ -60,7 +60,6 @@ def fall_back_torch_rope(query_states, key_states, rope_scale, position_ids, dev
     query_states = ttnn.from_torch(
         query_states,
         device=device,
-        mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
         memory_config=ttnn.L1_MEMORY_CONFIG,
@@ -68,7 +67,6 @@ def fall_back_torch_rope(query_states, key_states, rope_scale, position_ids, dev
     key_states = ttnn.from_torch(
         key_states,
         device=device,
-        mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
         memory_config=ttnn.L1_MEMORY_CONFIG,
@@ -214,6 +212,7 @@ class TtPhi3MiniAttention(LightweightModule):
             x,
             self.wqkv,
             memory_config=ttnn.L1_MEMORY_CONFIG,
+            # dtype=ttnn.bfloat8_b,
             dtype=ttnn.bfloat16,
         )
         ttnn.deallocate(x)
@@ -237,28 +236,41 @@ class TtPhi3MiniAttention(LightweightModule):
             xqkv_fused,
             num_heads=self.n_local_heads,
             num_kv_heads=self.n_local_kv_heads,
-            memory_config=ttnn.L1_MEMORY_CONFIG
-            # memory_config=ttnn.MemoryConfig(
-            #     ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1
-            # )
+            memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
+        # print(f"q_heads_1BQD: {q_heads_1BQD.shape}")
         query_pos = self.n_heads * self.head_dim
         query_states = xqkv_fused[..., :query_pos]
-        # key_states = xqkv_fused[..., query_pos : query_pos + self.n_kv_heads * self.head_dim]
-        # value_states = xqkv_fused[..., query_pos + self.n_kv_heads * self.head_dim :]
-
-        q_heads_1BQD = ttnn.reshape(query_states, (batch, self.n_heads, 1, self.head_dim))
-        # k_heads_1BKD = ttnn.reshape(key_states, (1, batch, self.n_kv_heads, self.head_dim))
-        # v_heads_1BKD = ttnn.reshape(value_states, (1, batch, self.n_kv_heads, self.head_dim))
-
-        # ttnn.deallocate(key_states)
-        # ttnn.deallocate(value_states)
+        q_heads_BQ1D = ttnn.reshape(
+            query_states, (batch, self.n_heads, 1, self.head_dim), memory_config=ttnn.L1_MEMORY_CONFIG
+        )
         ttnn.deallocate(query_states)
+        # key_states = xqkv_fused[..., query_pos : query_pos + self.n_kv_heads * self.head_dim]
+        # k_heads_1BKD = ttnn.reshape(key_states, (1, batch, self.n_kv_heads, self.head_dim), memory_config=ttnn.L1_MEMORY_CONFIG)
+        # ttnn.deallocate(key_states)
+        # value_states = xqkv_fused[..., query_pos + self.n_kv_heads * self.head_dim :]
+        # v_heads_1BKD = ttnn.reshape(value_states, (1, batch, self.n_kv_heads, self.head_dim), memory_config=ttnn.L1_MEMORY_CONFIG)
+        # ttnn.deallocate(value_states)
+
+        ttnn.deallocate(q_heads_1BQD)
         ttnn.deallocate(xqkv_fused)
-        print(f"q_heads_1BQD: {q_heads_1BQD.shape}")
         print(f"k_heads_1BKD: {k_heads_1BKD.shape}")
         print(f"v_heads_1BKD: {v_heads_1BKD.shape}")
+
+        # print(f"q_heads_1BQD layout: {q_heads_1BQD.layout}")
+        # print(f"k_heads_1BKD layout: {k_heads_1BKD.layout}")
+        # print(f"q_heads_1BQD mem: {q_heads_1BQD.memory_config}")
+        # print(f"k_heads_1BKD mem: {k_heads_1BKD.memory_config}")
+
+        # q_heads_1BQD, k_heads_1BKD = fall_back_torch_rope(
+        #     q_heads_1BQD, k_heads_1BKD, self.rotary_emb, current_pos, self.mesh_device
+        # )
+
+        # print(f"q_heads_1BQD layout: {q_heads_1BQD.layout}")
+        # print(f"k_heads_1BKD layout: {k_heads_1BKD.layout}")
+        # print(f"q_heads_1BQD mem: {q_heads_1BQD.memory_config}")
+        # print(f"k_heads_1BKD mem: {k_heads_1BKD.memory_config}")
 
         ###
         # KV update
@@ -266,11 +278,8 @@ class TtPhi3MiniAttention(LightweightModule):
         keys = self.layer_past[0]
         values = self.layer_past[1]
 
-        print(f"keys: {keys.shape}")
-        print(f"values: {values.shape}")
-
-        # k_heads, [seqlen, n_kv_heads, bsz, head_dim]
-        # v_heads [seqlen, n_kv_heads, bsz, head_dim]
+        # k_heads, [seqlen, bsz, n_kv_heads, head_dim]
+        # v_heads [seqlen, bsz, n_kv_heads, head_dim]
         # keys, [max_batch_size, n_kv_heads, max_seq_len, head_dim]
         ttnn.experimental.paged_update_cache(keys, k_heads_1BKD, update_idxs=[current_pos] * batch)
         ttnn.experimental.paged_update_cache(values, v_heads_1BKD, update_idxs=[current_pos] * batch)
@@ -279,43 +288,44 @@ class TtPhi3MiniAttention(LightweightModule):
         ttnn.deallocate(k_heads_1BKD)
         ttnn.deallocate(v_heads_1BKD)
 
+        values = self.layer_past[1]
         print(f"keys: {keys.shape}")
         print(f"values: {values.shape}")
         ###
         # Attention
         ###
         # transpose keys
-        # TODO: Check if this is feasible
         keys_BKD1 = ttnn.transpose(keys, 2, 3)
-        print(f"keys_BKD1: {keys_BKD1.shape}")
-        # q_heads_BQ1D = ttnn.reshape(q_heads_1BQD, (8, 32, 1, 96))
-        # ttnn.deallocate(q_heads_1BQD)
-        # print(f"q_heads_B1QD: {q_heads_B1QD.shape}")
-        # q_heads_BQ1D = ttnn.transpose(q_heads_B1QD, 1, 2)
-        # ttnn.deallocate(q_heads_B1QD)
-        # print(f"q_heads_BQ1D: {q_heads_BQ1D.shape}")
-
+        print(f"pre_softmax_matmul_q_heads_BQ1D: {q_heads_BQ1D.shape}")
+        print(f"pre_softmax_keys_BKD1: {keys_BKD1.shape}")
         wattn_1BQS = ttnn.matmul(
-            q_heads_1BQD,
+            q_heads_BQ1D,
             keys_BKD1,
             dtype=ttnn.bfloat16,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             compute_kernel_config=self.compute_kernel_attn,
         )
-        ttnn.deallocate(q_heads_1BQD)
+        # ttnn.deallocate(q_heads_1BQD)
         ttnn.deallocate(keys_BKD1)
 
         print(f"wattn_1BQS: {wattn_1BQS.shape}")
 
-        wattn_1BQS = ttnn.mul(wattn_1BQS, self.attn_output_multiplier, memory_config=ttnn.L1_MEMORY_CONFIG)
-        if attn_mask_1B4P is not None:
-            wattn_1BQS = ttnn.add(
-                wattn_1BQS,
-                attn_mask_1B4P,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-            )
-        # wattn_1BQS = ttnn.scale_mask_softmax_in_place(wattn_1BQS)
-        wattn_1BQS = ttnn.softmax(wattn_1BQS, dim=-1)
+        # wattn_1BQS = ttnn.mul(
+        #     wattn_1BQS, self.attn_output_multiplier, memory_config=ttnn.L1_MEMORY_CONFIG
+        # )
+        # if attn_mask_1B4P is not None:
+        #     wattn_1BQS = ttnn.add(
+        #         wattn_1BQS,
+        #         attn_mask_1B4P,
+        #         memory_config=ttnn.L1_MEMORY_CONFIG,
+        #     )
+        # wattn_1BQS = ttnn.softmax(wattn_1BQS, dim=-1)
+        wattn_1BQS = ttnn.scale_mask_softmax_in_place(
+            wattn_1BQS,
+            scale=self.attn_output_multiplier,
+            mask=attn_mask_1B4P,
+            is_causal_mask=False,  # causal_mask=False will broadcast attention mask across all heads
+        )
 
         print(f"wattn_1BQS_softmax: {wattn_1BQS.shape}")
 
@@ -329,7 +339,7 @@ class TtPhi3MiniAttention(LightweightModule):
 
         print(f"attn_O: {attn_O.shape}")
         attn_O = ttnn.transpose(attn_O, 1, 2)
-        attn_O = ttnn.reshape(attn_O, (batch, 1, self.hidden_size))
+        attn_O = ttnn.reshape(attn_O, (1, batch, self.hidden_size))
 
         attn_O = ttnn.matmul(
             attn_O,
