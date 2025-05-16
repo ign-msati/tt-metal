@@ -7,53 +7,8 @@ from models.experimental.phi3_mini_may.tt.phi3_mini_attention import TtPhi3MiniA
 from models.utility_functions import comp_pcc, comp_allclose
 from transformers import AutoModelForCausalLM, DynamicCache
 from ttnn import ConcatMeshToTensor
-from models.experimental.grok.tt.grok_common import prepare_inputs_ttnn, prepare_rotation_mat_ttnn
 from models.experimental.phi3_mini_may.tt.model_config import TtPhi3MiniKernelConfigs
-from models.utility_functions import nearest_32
-
-
-def prepare_inputs_ttnn(x_bsh, hidden_size, current_pos, mesh_device, max_seq_len):
-    """
-    Prepare inputs for decode mode.
-    x: (batch, seq, hidden_dim)
-    B: batch (32)
-    S: sequence len (1)
-    H: dim (4096)
-    """
-    assert x_bsh.size(2) == hidden_size
-    assert len(x_bsh.size()) == 3
-
-    batch = x_bsh.size(0)
-    seq_len = x_bsh.size(1)
-    assert seq_len == 1, "Only supporting decode mode"
-
-    x_1SBH = x_bsh.view(1, seq_len, batch, hidden_size)
-
-    # input goes to L1
-    xs_1SBH = ttnn.from_torch(
-        x_1SBH,
-        device=mesh_device,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.L1_MEMORY_CONFIG,
-    )
-
-    # Attention mask
-    padded_layer_past_len = nearest_32(current_pos + 1)
-    attn_mask = torch.zeros(batch, 1, seq_len, max_seq_len)  # [SB4P]
-
-    # Fill mask with -inf outside the processed tokens
-    attn_mask[:, :, :, current_pos + 1 :] = torch.finfo(attn_mask.dtype).min
-
-    attn_mask = ttnn.from_torch(
-        attn_mask,
-        device=mesh_device,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-
-    return xs_1SBH, attn_mask
+from models.experimental.phi3_mini_may.tt.phi3_mini_common import prepare_inputs_ttnn, prepare_rotation_mat_ttnn
 
 
 def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_back_to_torch=False, device=None):
@@ -61,7 +16,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
         device = ttnn.open_device(device_id=0)
     torch.manual_seed(42)
 
-    expected_pcc_score = 0.1
+    expected_pcc_score = 0.99
     dtype = ttnn.bfloat8_b
     batch = 8
     seq_len = 1  # length to generate
@@ -95,12 +50,22 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
         kernel_args=kernel_args,
     )
 
-    rot_mat = prepare_rotation_mat_ttnn(
+    long_factor = torch.tensor(model_config.rope_scaling["long_factor"], dtype=torch.float32)
+    short_factor = torch.tensor(model_config.rope_scaling["short_factor"], dtype=torch.float32)
+    long_factor_rot_mat = prepare_rotation_mat_ttnn(
         head_dim,
         max_seq_len,
-        tt_model.mesh_device,
+        ext_scale_factor=long_factor,
+        mesh_device=tt_model.mesh_device,
+    )
+    short_factor_rot_mat = prepare_rotation_mat_ttnn(
+        head_dim,
+        max_seq_len,
+        ext_scale_factor=short_factor,
+        mesh_device=tt_model.mesh_device,
     )
 
+    pcc_cum = ""
     for i in range(generation_length):
         pt_attention_input = torch.rand(batch, seq_len, model_config.hidden_size)
         tt_attention_input = pt_attention_input
@@ -116,7 +81,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
 
         tt_out = tt_model(
             attention_input,
-            rot_mat,
+            short_factor_rot_mat,
             current_pos,
             attn_mask,
         )
@@ -126,12 +91,11 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
             ttnn.to_torch(tt_out, mesh_composer=ConcatMeshToTensor(device, dim=0))[0].squeeze(2).view(batch, 1, -1)
         )  # [ batch, seq, hidden_dim]
 
-        positions = torch.LongTensor([[current_pos]])
+        positions = torch.LongTensor([[current_pos]] * batch)
         reference_output, _, ref_past_key_value = reference_model(
             pt_attention_input,
             past_key_value=ref_past_key_value,
             position_ids=positions,
-            use_cache=True,
         )
 
         passing, pcc_message = comp_pcc(reference_output, tt_output_torch, expected_pcc_score)
@@ -139,6 +103,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
         logger.info(comp_allclose(reference_output, tt_output_torch))
         logger.info(pcc_message)
 
+        pcc_cum = pcc_cum + f"current_pos={current_pos} pcc: {pcc_message}\n"
         if passing:
             logger.info(f"[current_pos={current_pos}] Phi3_Mini_Attention Passed!")
         else:
@@ -146,6 +111,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
             all_tests_pass = False
     if all_tests_pass:
         logger.info("Phi3_Mini Attention output Passed!")
+        logger.info(pcc_cum)
     else:
         logger.warning("Phi3_Mini Attention output Failed!")
         assert all_tests_pass, f"PCC value is lower than {expected_pcc_score} for some of the outputs. Check Warnings!"
