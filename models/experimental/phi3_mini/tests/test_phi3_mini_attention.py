@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import ttnn
 
@@ -11,14 +15,14 @@ from models.experimental.phi3_mini_may.tt.model_config import TtPhi3MiniKernelCo
 from models.experimental.phi3_mini_may.tt.phi3_mini_common import prepare_inputs_ttnn, prepare_rotation_mat_ttnn
 
 
-def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_back_to_torch=False, device=None):
+def test_phi3_mini_attention_inference(batch: int = 32, generation_length: int = 10, device=None):
     if device == None:
         device = ttnn.open_device(device_id=0)
     torch.manual_seed(42)
 
     expected_pcc_score = 0.99
     dtype = ttnn.bfloat8_b
-    batch = 8
+    batch = batch
     seq_len = 1  # length to generate
     generation_start_pos = 0  # Ref model can only start from pos 0
     generation_length = 10
@@ -32,7 +36,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
     model_config = base_model.config
 
     head_dim = model_config.hidden_size // model_config.num_attention_heads
-    max_seq_len = model_config.max_position_embeddings // 128
+    max_seq_len = model_config.max_position_embeddings // 16
     # ref_past_key_value = StaticCache(config=model_config, max_batch_size=batch, max_cache_len=1)
     ref_past_key_value = DynamicCache()
 
@@ -48,6 +52,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
         layer_idx=SELF_ATTN_LAYER_INDEX,
         device=device,
         kernel_args=kernel_args,
+        max_batch_size=batch,
     )
 
     long_factor = torch.tensor(model_config.rope_scaling["long_factor"], dtype=torch.float32)
@@ -64,6 +69,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
         ext_scale_factor=short_factor,
         mesh_device=tt_model.mesh_device,
     )
+    rot_mats = [long_factor_rot_mat, short_factor_rot_mat]
 
     pcc_cum = ""
     for i in range(generation_length):
@@ -81,7 +87,7 @@ def test_phi3_mini_attention_inference(batch: int = 1, seq_len: int = 128, fall_
 
         tt_out = tt_model(
             attention_input,
-            short_factor_rot_mat,
+            rot_mats,
             current_pos,
             attn_mask,
         )

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Optional, Tuple
 
 import torch
@@ -10,7 +14,7 @@ from models.experimental.grok.tt.grok_common import LightweightModule
 
 
 class TtPhi3MiniAttention(LightweightModule):
-    def __init__(self, config, state_dict, base_address, layer_idx, device, kernel_args):
+    def __init__(self, config, state_dict, base_address, layer_idx, device, kernel_args, max_batch_size=32):
         super().__init__()
 
         self.device = device
@@ -22,11 +26,11 @@ class TtPhi3MiniAttention(LightweightModule):
         self.hidden_size = config.hidden_size
         self.n_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
-        self.max_seq_len = config.max_position_embeddings // 128
-        self.max_batch_size = 8
+        self.max_seq_len = config.max_position_embeddings // 16
+        self.max_batch_size = max_batch_size
         self.n_kv_heads = config.num_key_value_heads
         self.attn_output_multiplier = 1.0 / math.sqrt(self.head_dim)
-
+        self.original_max_seq_len = config.original_max_position_embeddings
         self.n_local_heads = self.n_heads // self.num_devices
         self.n_local_kv_heads = self.n_kv_heads // self.num_devices
         self.model_mem_configs = self.model_args.get_model_mem_configs()
@@ -82,8 +86,7 @@ class TtPhi3MiniAttention(LightweightModule):
         self.layer_past = [
             ttnn.as_tensor(
                 k_or_v,
-                dtype=ttnn.bfloat16,
-                # dtype=ttnn.bfloat8_b,
+                dtype=ttnn.bfloat8_b,
                 layout=self.model_mem_configs["ATTN_W_LAYOUT_TILE"],
                 device=self.mesh_device,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -121,9 +124,11 @@ class TtPhi3MiniAttention(LightweightModule):
         D : head_dim (96)
         P : padded_layer_past_len
         """
-        rot_mat = rot_mats[current_pos]
+        if current_pos > self.original_max_seq_len:
+            rot_mat = rot_mats[0][current_pos]
+        else:
+            rot_mat = rot_mats[1][current_pos]
         attn_mask_B11P = attn_masks
-        batch = x.shape[-2]
 
         ###
         # QKV Linear
@@ -139,7 +144,9 @@ class TtPhi3MiniAttention(LightweightModule):
 
         # Reshape such that true unpadded batch is tracked in shape
         # TODO: check what this does and is it needed
-        xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, batch, xqkv_fused.shape[3]), (1, 1, 32, xqkv_fused.shape[3]))
+        xqkv_fused = ttnn.reshape(
+            xqkv_fused, (1, 1, self.max_batch_size, xqkv_fused.shape[3]), (1, 1, 32, xqkv_fused.shape[3])
+        )
 
         ###
         # Reshape and rotary embeddings TODO: Scaled ROPE for >4k Context length
@@ -161,7 +168,7 @@ class TtPhi3MiniAttention(LightweightModule):
         query_pos = self.n_heads * self.head_dim
         query_states = xqkv_fused[..., :query_pos]
         q_heads_B1QD = ttnn.reshape(
-            query_states, (batch, 1, self.n_kv_heads, self.head_dim), memory_config=ttnn.L1_MEMORY_CONFIG
+            query_states, (self.max_batch_size, 1, self.n_kv_heads, self.head_dim), memory_config=ttnn.L1_MEMORY_CONFIG
         )
         ttnn.deallocate(query_states)
         ttnn.deallocate(xqkv_fused)
@@ -176,7 +183,7 @@ class TtPhi3MiniAttention(LightweightModule):
             q_heads_B1QD,
             rot_mat,
             memory_config=self.q_mem_config,
-            compute_kernel_config=self.compute_kernel_attn
+            compute_kernel_config=self.compute_kernel_attn,
             # [bsz, seqlen, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [bsz, seqlen, padd_heads, head_dim]
         )
         # print(f"k_heads_1BKD: {k_heads_1BKD.shape}")
@@ -184,7 +191,7 @@ class TtPhi3MiniAttention(LightweightModule):
             k_heads_1BKD,
             rot_mat,
             memory_config=self.k_mem_config,
-            compute_kernel_config=self.compute_kernel_attn
+            compute_kernel_config=self.compute_kernel_attn,
             # [seqlen, bsz, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [seqlen, bsz, padd_heads, head_dim]
         )
 
@@ -194,8 +201,8 @@ class TtPhi3MiniAttention(LightweightModule):
         # print(f"v_heads_1BKD: {v_heads_1BKD.shape}")
         keys_BKPD = self.layer_past[0]
         values_BKPD = self.layer_past[1]
-        ttnn.experimental.paged_update_cache(keys_BKPD, k_heads_1BKD, update_idxs=[current_pos] * batch)
-        ttnn.experimental.paged_update_cache(values_BKPD, v_heads_1BKD, update_idxs=[current_pos] * batch)
+        ttnn.experimental.paged_update_cache(keys_BKPD, k_heads_1BKD, update_idxs=[current_pos] * self.max_batch_size)
+        ttnn.experimental.paged_update_cache(values_BKPD, v_heads_1BKD, update_idxs=[current_pos] * self.max_batch_size)
         ttnn.deallocate(k_heads_1BKD)
         ttnn.deallocate(v_heads_1BKD)
 
@@ -213,7 +220,7 @@ class TtPhi3MiniAttention(LightweightModule):
             q_heads_BQ1D,
             keys_BKDP,
             dtype=ttnn.bfloat16,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             compute_kernel_config=self.compute_kernel_attn,
         )
         ttnn.deallocate(q_heads_BQ1D)
@@ -221,12 +228,22 @@ class TtPhi3MiniAttention(LightweightModule):
 
         # TODO: Load nearest32 padded attention mask instead max_seqlen
         # print(f"wattn_BQ1P: {wattn_BQ1P.shape}")
-        wattn_BQ1P = ttnn.scale_mask_softmax_in_place(
-            wattn_BQ1P,
-            scale=self.attn_output_multiplier,
-            mask=attn_mask_B11P,
-            is_causal_mask=False,  # causal_mask=False will broadcast attention mask across all heads
-        )
+        # wattn_BQ1P = ttnn.scale_mask_softmax(
+        #     wattn_BQ1P,
+        #     scale=self.attn_output_multiplier,
+        #     mask=attn_mask_B11P,
+        #     is_causal_mask=False,  # causal_mask=False will broadcast attention mask across all heads
+        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        # )
+        # TODO: Checkout why ttnn.scale_mask_softmax fails with DRAM config for context len > 1k and
+        wattn_BQ1P = ttnn.mul(wattn_BQ1P, self.attn_output_multiplier, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if attn_mask_B11P is not None:
+            wattn_BQ1P = ttnn.add(
+                wattn_BQ1P,
+                attn_mask_B11P,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+        wattn_BQ1P = ttnn.softmax(wattn_BQ1P, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         # print(f"values_BKPD: {values_BKPD.shape}")
         attn_output_BQ1D = ttnn.matmul(
@@ -243,7 +260,7 @@ class TtPhi3MiniAttention(LightweightModule):
         ttnn.deallocate(attn_output_BQ1D)
 
         # print(f"attn_output_B1QD: {attn_output_B1QD.shape}")
-        attn_output_11BH = ttnn.reshape(attn_output_B1QD, (1, batch, self.hidden_size))
+        attn_output_11BH = ttnn.reshape(attn_output_B1QD, (1, self.max_batch_size, self.hidden_size))
         ttnn.deallocate(attn_output_B1QD)
 
         # print(f"attn_output_11BH: {attn_output_11BH.shape}")
@@ -251,7 +268,7 @@ class TtPhi3MiniAttention(LightweightModule):
             attn_output_11BH,
             self.wo,
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             compute_kernel_config=self.compute_kernel_attn,
         )
 
