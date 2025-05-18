@@ -1,7 +1,3 @@
-# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
-
-# SPDX-License-Identifier: Apache-2.0
-
 from typing import Optional, Tuple
 
 import torch
@@ -10,11 +6,31 @@ import math
 
 from models.common.lightweightmodule import LightweightModule
 from ttnn import ShardTensorToMesh, ReplicateTensorToMesh
-from models.experimental.grok.tt.grok_common import LightweightModule
+
+
+def num_to_corerange(x):
+    assert x < 8 or x % 8 == 0
+    num_x = min(x, 8)
+    num_y = x // num_x
+    assert num_x * num_y == x
+    return ttnn.CoreRange(
+        ttnn.CoreCoord(0, 0),
+        ttnn.CoreCoord(num_x - 1, num_y - 1),
+    )
 
 
 class TtPhi3MiniAttention(LightweightModule):
-    def __init__(self, config, state_dict, base_address, layer_idx, device, kernel_args, max_batch_size=32):
+    def __init__(
+        self,
+        config,
+        state_dict,
+        base_address,
+        layer_idx,
+        device,
+        kernel_args,
+        max_batch_size=32,
+        transformation_mats=None,
+    ):
         super().__init__()
 
         self.device = device
@@ -34,6 +50,7 @@ class TtPhi3MiniAttention(LightweightModule):
         self.n_local_heads = self.n_heads // self.num_devices
         self.n_local_kv_heads = self.n_kv_heads // self.num_devices
         self.model_mem_configs = self.model_args.get_model_mem_configs()
+        self.transformation_mats = transformation_mats
         # self.dtype = dtype # TODO: take it as arg from init
 
         self.wqkv = ttnn.as_tensor(
@@ -105,9 +122,9 @@ class TtPhi3MiniAttention(LightweightModule):
         self.q_mem_config = None
         self.k_mem_config = None
 
-    def forward(
+    def forward_decode(
         self,
-        x: ttnn.Tensor,
+        x,
         rot_mats,
         current_pos,
         attn_masks,
@@ -124,11 +141,6 @@ class TtPhi3MiniAttention(LightweightModule):
         D : head_dim (96)
         P : padded_layer_past_len
         """
-        if current_pos > self.original_max_seq_len:
-            rot_mat = rot_mats[0][current_pos]
-        else:
-            rot_mat = rot_mats[1][current_pos]
-        attn_mask_B11P = attn_masks
 
         ###
         # QKV Linear
@@ -142,12 +154,6 @@ class TtPhi3MiniAttention(LightweightModule):
         )
         ttnn.deallocate(x)
 
-        # Reshape such that true unpadded batch is tracked in shape
-        # TODO: check what this does and is it needed
-        xqkv_fused = ttnn.reshape(
-            xqkv_fused, (1, 1, self.max_batch_size, xqkv_fused.shape[3]), (1, 1, 32, xqkv_fused.shape[3])
-        )
-
         ###
         # Reshape and rotary embeddings TODO: Scaled ROPE for >4k Context length
         ###
@@ -160,28 +166,19 @@ class TtPhi3MiniAttention(LightweightModule):
             xqkv_fused,
             num_heads=self.n_local_heads,
             num_kv_heads=self.n_local_kv_heads,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
+            memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG,
         )
-        ttnn.deallocate(q_heads_1BQD)
-
-        # TODO: Check if this can be substituted by a normal transpose
-        query_pos = self.n_heads * self.head_dim
-        query_states = xqkv_fused[..., :query_pos]
-        q_heads_B1QD = ttnn.reshape(
-            query_states, (self.max_batch_size, 1, self.n_kv_heads, self.head_dim), memory_config=ttnn.L1_MEMORY_CONFIG
-        )
-        ttnn.deallocate(query_states)
         ttnn.deallocate(xqkv_fused)
 
         if self.q_mem_config is None:
-            self.q_mem_config = q_heads_B1QD.memory_config()
+            self.q_mem_config = q_heads_1BQD.memory_config()
         if self.k_mem_config is None:
             self.k_mem_config = k_heads_1BKD.memory_config()
 
-        # print(f"q_heads_B1QD: {q_heads_B1QD.shape}")
-        q_heads_B1QD = ttnn.matmul(
-            q_heads_B1QD,
-            rot_mat,
+        # print(f"q_heads_1BQD: {q_heads_1BQD.shape}")
+        q_heads_1BQD = ttnn.matmul(
+            q_heads_1BQD,
+            rot_mats,
             memory_config=self.q_mem_config,
             compute_kernel_config=self.compute_kernel_attn,
             # [bsz, seqlen, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [bsz, seqlen, padd_heads, head_dim]
@@ -189,11 +186,26 @@ class TtPhi3MiniAttention(LightweightModule):
         # print(f"k_heads_1BKD: {k_heads_1BKD.shape}")
         k_heads_1BKD = ttnn.matmul(
             k_heads_1BKD,
-            rot_mat,
+            rot_mats,
             memory_config=self.k_mem_config,
             compute_kernel_config=self.compute_kernel_attn,
             # [seqlen, bsz, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [seqlen, bsz, padd_heads, head_dim]
         )
+
+        # q_heads_1BQD = ttnn.experimental.rotary_embedding_llama(
+        #     q_heads_1BQD,  # example input
+        #     rot_mats[0],
+        #     rot_mats[1],
+        #     transformation_mats_decode,
+        #     is_decode_mode=True
+        # )
+        # k_heads_1BKD = ttnn.experimental.rotary_embedding_llama(
+        #     k_heads_1BKD, # example input
+        #     rot_mats[0],
+        #     rot_mats[1],
+        #     transformation_mats_decode,
+        #     is_decode_mode=True
+        # )
 
         ###
         # KV update
@@ -209,59 +221,46 @@ class TtPhi3MiniAttention(LightweightModule):
         ###
         # Attention
         ###
-        # transpose keys and queries
-        q_heads_BQ1D = ttnn.transpose(q_heads_B1QD, 1, 2)
-        ttnn.deallocate(q_heads_B1QD)
-        # print(f"keys_BKPD: {keys_BKPD.shape}")
-        keys_BKDP = ttnn.transpose(keys_BKPD, 2, 3)
-        # print(f"q_heads_BQ1D: {q_heads_BQ1D.shape}")
-        # print(f"keys_BKDP: {keys_BKDP.shape}")
-        wattn_BQ1P = ttnn.matmul(
-            q_heads_BQ1D,
-            keys_BKDP,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            compute_kernel_config=self.compute_kernel_attn,
-        )
-        ttnn.deallocate(q_heads_BQ1D)
-        ttnn.deallocate(keys_BKDP)
-
-        # TODO: Load nearest32 padded attention mask instead max_seqlen
-        # print(f"wattn_BQ1P: {wattn_BQ1P.shape}")
-        # wattn_BQ1P = ttnn.scale_mask_softmax(
-        #     wattn_BQ1P,
-        #     scale=self.attn_output_multiplier,
-        #     mask=attn_mask_B11P,
-        #     is_causal_mask=False,  # causal_mask=False will broadcast attention mask across all heads
-        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        # )
-        # TODO: Checkout why ttnn.scale_mask_softmax fails with DRAM config for context len > 1k and
-        wattn_BQ1P = ttnn.mul(wattn_BQ1P, self.attn_output_multiplier, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        if attn_mask_B11P is not None:
-            wattn_BQ1P = ttnn.add(
-                wattn_BQ1P,
-                attn_mask_B11P,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-        wattn_BQ1P = ttnn.softmax(wattn_BQ1P, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-
-        # print(f"values_BKPD: {values_BKPD.shape}")
-        attn_output_BQ1D = ttnn.matmul(
-            wattn_BQ1P,
+        # print(f"q_heads_1BQD: {q_heads_1BQD.shape}")
+        attn_output_1G4D = ttnn.transformer.scaled_dot_product_attention_decode(
+            q_heads_1BQD,
+            keys_BKPD,
             values_BKPD,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-            compute_kernel_config=self.compute_kernel_attn,
+            cur_pos=[current_pos] * self.max_batch_size,
+            scale=self.attn_output_multiplier,
+            attn_mask=attn_masks,
+            is_causal=True if attn_masks is None else False,
+            program_config=ttnn.SDPAProgramConfig(
+                compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
+                exp_approx_mode=False,
+                q_chunk_size=256,
+                k_chunk_size=256,
+            ),
+            compute_kernel_config=ttnn.WormholeComputeKernelConfig(
+                math_fidelity=ttnn.MathFidelity.HiFi2,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=True,
+            ),
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,  # FIXME: why not L1 height sharded
         )
-        ttnn.deallocate(wattn_BQ1P)
+        ttnn.deallocate(q_heads_1BQD)
 
-        # print(f"attn_output_BQ1D: {attn_output_BQ1D.shape}")
-        attn_output_B1QD = ttnn.transpose(attn_output_BQ1D, 1, 2)
-        ttnn.deallocate(attn_output_BQ1D)
+        # print(f"attn_output_1G4D: {attn_output_1G4D.shape}")
+        attn_output_11BH = ttnn.to_memory_config(
+            attn_output_1G4D,
+            memory_config=ttnn.create_sharded_memory_config(
+                shape=(math.ceil(self.n_local_heads / 32) * 32, self.head_dim),  # self.n_heads padded to tile size
+                core_grid=ttnn.CoreRangeSet({num_to_corerange(self.max_batch_size)}),
+                strategy=ttnn.ShardStrategy.HEIGHT,
+                orientation=ttnn.ShardOrientation.ROW_MAJOR,
+                use_height_and_width_as_shard_shape=True,
+            ),
+        )
+        ttnn.deallocate(attn_output_1G4D)
 
-        # print(f"attn_output_B1QD: {attn_output_B1QD.shape}")
-        attn_output_11BH = ttnn.reshape(attn_output_B1QD, (1, self.max_batch_size, self.hidden_size))
-        ttnn.deallocate(attn_output_B1QD)
+        # print(f"attn_output_1BQD: {attn_output_1BQD.shape}")
+        attn_output_11BH = ttnn.experimental.nlp_concat_heads_decode(attn_output_11BH, num_heads=self.n_heads)
 
         # print(f"attn_output_11BH: {attn_output_11BH.shape}")
         attn_output_11BH = ttnn.matmul(
@@ -273,3 +272,186 @@ class TtPhi3MiniAttention(LightweightModule):
         )
 
         return attn_output_11BH
+
+    def forward_prefill(
+        self,
+        x,
+        rot_mats,
+        user_id,
+        attn_masks,
+    ) -> Tuple[ttnn.Tensor, Optional[ttnn.Tensor], Optional[Tuple[ttnn.Tensor]]]:
+        """
+        x: (1, batch, seq_len, hidden_dim)
+        current_pos: the length of the KV cache. Same as current token's index.
+        attn_masks: (seq_len, batch, n_heads, cache_len+seq_len)
+        rot_mats: list of rotation matrices for each device
+
+        Tensors are postfixed with 4 characters that represent their 4-D shape:
+        S : seq_len (8)
+        H : dim (3072)
+        D : head_dim (96)
+        P : padded_layer_past_len
+        """
+        seq_len = x.shape[-2]
+
+        ###
+        # QKV Linear
+        ###
+        # print(f"x_11SH: {x.shape}")
+        xqkv_fused = ttnn.linear(
+            x,
+            self.wqkv,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+        )
+        ttnn.deallocate(x)
+
+        ###
+        # Reshape and rotary embeddings TODO: Scaled ROPE for >4k Context length
+        ###
+        # print(f"fused_qkv: {xqkv_fused.shape}")
+        # split qkv into heads
+        (
+            q_heads_1QSD,
+            k_heads_1KSD,
+            v_heads_1VSD,
+        ) = ttnn.experimental.nlp_create_qkv_heads(
+            xqkv_fused,
+            num_heads=self.n_local_heads,
+            num_kv_heads=self.n_local_kv_heads,
+            transpose_k_heads=False,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        ttnn.deallocate(xqkv_fused)
+
+        # TODO: Should this be removed one padding optimisations are in?
+        if seq_len % 32 != 0:
+            q_heads_1QSD = ttnn.slice(q_heads_1QSD, [0, 0, 0, 0], [1, self.n_kv_heads, seq_len, self.head_dim])
+            k_heads_1KSD = ttnn.slice(k_heads_1KSD, [0, 0, 0, 0], [1, self.n_kv_heads, seq_len, self.head_dim])
+            v_heads_1VSD = ttnn.slice(v_heads_1VSD, [0, 0, 0, 0], [1, self.n_kv_heads, seq_len, self.head_dim])
+
+        if self.q_mem_config is None:
+            self.q_mem_config = q_heads_1QSD.memory_config()
+        if self.k_mem_config is None:
+            self.k_mem_config = k_heads_1KSD.memory_config()
+
+        # print(f"q_heads_1QSD: {q_heads_1QSD.shape}")
+        q_heads_1QSD = ttnn.transpose(q_heads_1QSD, 1, 2)
+        q_heads_1QSD = ttnn.matmul(
+            q_heads_1QSD,
+            rot_mats,
+            memory_config=self.q_mem_config,
+            compute_kernel_config=self.compute_kernel_attn,
+            # [bsz, seqlen, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [bsz, seqlen, padd_heads, head_dim]
+        )
+        q_heads_1QSD = ttnn.transpose(q_heads_1QSD, 1, 2)
+
+        # print(f"k_heads_1KSD: {k_heads_1KSD.shape}")
+        k_heads_1KSD = ttnn.transpose(k_heads_1KSD, 1, 2)
+        k_heads_1KSD = ttnn.matmul(
+            k_heads_1KSD,
+            rot_mats,
+            memory_config=self.k_mem_config,
+            compute_kernel_config=self.compute_kernel_attn,
+            # [bsz, seqlen, padd_heads, head_dim]  # [1, 1, head_dim, head_dim]  => [bsz, seqlen, padd_heads, head_dim]
+        )
+        k_heads_1KSD = ttnn.transpose(k_heads_1KSD, 1, 2)
+
+        # print(f"q_heads_1QSD: {q_heads_1QSD.shape}")
+        # print(f"k_heads_1KSD: {k_heads_1KSD.shape}")
+        # q_heads_1QSD = ttnn.experimental.rotary_embedding(
+        #     q_heads_1QSD,
+        #     rot_mats[0],
+        #     rot_mats[1],
+        #     token_index=None,
+        #     memory_config=self.q_mem_config,
+        #     compute_kernel_config=self.compute_kernel_attn,
+        # )
+        # k_heads_1KSD = ttnn.experimental.rotary_embedding(
+        #     k_heads_1KSD,
+        #     rot_mats[0],
+        #     rot_mats[1],
+        #     token_index=None,
+        #     memory_config=self.k_mem_config,
+        #     compute_kernel_config=self.compute_kernel_attn,
+        # )
+
+        ###
+        # KV update
+        ###
+        # print(f"v_heads_1VSD: {v_heads_1VSD.shape}")
+        k_heads_1KSD = ttnn.typecast(k_heads_1KSD, dtype=ttnn.bfloat8_b)
+        v_heads_1VSD = ttnn.typecast(v_heads_1VSD, dtype=ttnn.bfloat8_b)
+        keys_BKPD = self.layer_past[0]
+        values_BKPD = self.layer_past[1]
+        ttnn.fill_cache(keys_BKPD, k_heads_1KSD, user_id)
+        ttnn.fill_cache(values_BKPD, v_heads_1VSD, user_id)
+
+        ###
+        # Attention
+        ###
+        # print(f"q_heads_1QSD: {q_heads_1QSD.shape}")
+        # print(f"k_heads_1KDS: {k_heads_1KDS.shape}")
+        attn_output_1QSD = ttnn.transformer.scaled_dot_product_attention(
+            q_heads_1QSD,
+            k_heads_1KSD,
+            v_heads_1VSD,
+            attn_mask=attn_masks,
+            is_causal=True if attn_masks is None else False,
+            scale=self.attn_output_multiplier,
+            program_config=ttnn.SDPAProgramConfig(
+                compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
+                exp_approx_mode=False,
+                q_chunk_size=256,
+                k_chunk_size=256,
+            ),
+            compute_kernel_config=ttnn.WormholeComputeKernelConfig(
+                math_fidelity=ttnn.MathFidelity.HiFi2,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=True,
+            ),
+        )
+        ttnn.deallocate(q_heads_1QSD)
+        ttnn.deallocate(k_heads_1KSD)
+        ttnn.deallocate(v_heads_1VSD)
+
+        # print(f"attn_output_1QSD: {attn_output_1QSD.shape}")
+        attn_output_11SH = ttnn.experimental.nlp_concat_heads(attn_output_1QSD)
+        ttnn.deallocate(attn_output_1QSD)
+
+        # print(f"attn_output_11SH: {attn_output_11SH.shape}")
+        attn_output_11SH = ttnn.matmul(
+            attn_output_11SH,
+            self.wo,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat8_b,
+            compute_kernel_config=self.compute_kernel_attn,
+        )
+
+        return attn_output_11SH
+
+    def forward(
+        self,
+        x,
+        rot_mats,
+        current_pos,
+        attn_masks,
+        mode: str = "decode",
+    ):
+        if mode == "prefill":
+            return self.forward_prefill(
+                x,
+                rot_mats,
+                current_pos,
+                attn_masks,
+            )
+        elif mode == "decode":
+            return self.forward_decode(
+                x,
+                rot_mats,
+                current_pos,
+                attn_masks,
+            )
+        else:
+            raise ValueError("Invalid run mode")
