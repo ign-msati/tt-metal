@@ -7,17 +7,13 @@ from loguru import logger
 import os
 import ttnn
 from models.tt_transformers.tt.attention import Attention
-from models.tt_transformers.tt.model_config import ModelArgs
-# from models.experimental.phi3_mini.tt.phi3_mini_attention import TtPhi3MiniAttention
-# from models.experimental.phi3_mini.tt.model_config import ModelArgs
-from models.tt_transformers.tt.common import PagedAttentionConfig
 from models.utility_functions import (
     comp_pcc,
     comp_allclose,
 )
 from models.utility_functions import skip_for_grayskull
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, get_rot_transformation_mat
-from transformers import AutoModelForCausalLM, DynamicCache
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, get_rot_transformation_mat, PagedAttentionConfig
 
 
 @torch.no_grad()
@@ -25,7 +21,7 @@ from transformers import AutoModelForCausalLM, DynamicCache
 @pytest.mark.parametrize(
     "mesh_device",
     [
-        {"N150": (1, 1), "N300": (1, 2)}.get(
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
             os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
         )
     ],
@@ -36,11 +32,11 @@ from transformers import AutoModelForCausalLM, DynamicCache
     "paged_attention",
     (
         True,
-        # False,
+        False,
     ),
     ids=(
         "paged_attention",
-        # "default_attention",
+        "default_attention",
     ),
 )
 @pytest.mark.parametrize(
@@ -68,17 +64,23 @@ def test_attention_inference(
     pcc = 0.99
     batch_size = 1  # For prefill we only support batch_size = 1
 
-    model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
+    model_args = Phi3MiniModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
     model_args.n_layers = 1
     state_dict = model_args.load_state_dict()
 
-    # reference_model = model_args.reference_attention()
-    base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-    reference_model = base_model.model.layers[0].self_attn
+    reference_model = model_args.reference_attention()
 
     # pre-compute the rotational embedding matrix and send to device
-
-    rot_mats = get_prefill_rot_mat(model_args.head_dim, mesh_device, max_seq_len, model_args.rope_ext_scaling, model_args.orig_context_len, start_pos=0)
+    rot_mats = get_prefill_rot_mat(
+        model_args.head_dim,
+        mesh_device,
+        max_seq_len,
+        model_args.rope_theta,
+        model_args.rope_scaling_factor,
+        model_args.rope_scaling,
+        model_args.orig_context_len,
+        start_pos=0
+    )
     transformation_mat_torch = get_rot_transformation_mat(model_args.head_dim)
 
     transformation_mats_prefill = ttnn.as_tensor(
@@ -91,6 +93,8 @@ def test_attention_inference(
     )
     transformation_mats = {"prefill": transformation_mats_prefill}
 
+    generation_start_pos = 0
+    generation_length = 3
     all_tests_pass = True
 
     # Setup page table
@@ -147,16 +151,10 @@ def test_attention_inference(
         tt_out, mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, dims=(1, 3), mesh_shape=model_args.cluster_shape)
     )
     tt_output_torch = tt_out[:, 0:1, :, : model_args.dim].view(batch_size, max_seq_len, -1)  # [ batch, seq, hidden_dim]
-
-    position_ids = torch.arange(0, max_seq_len, 1, dtype=torch.long).unsqueeze(0)
-    torch_attn_mask = torch.triu(torch.ones(1, 1, max_seq_len, max_seq_len) * float('-inf'), diagonal=1)
-    ref_past_key_value = DynamicCache()
-    reference_output, _, _ = reference_model(
-        pt_attention_input,
-        past_key_value=ref_past_key_value,
-        position_ids=position_ids,
-        attention_mask=torch_attn_mask,
-    )
+    positions = torch.LongTensor(range(max_seq_len))
+    attn_mask = torch.full((max_seq_len, max_seq_len), torch.finfo(torch.float32).min)
+    attn_mask_torch = torch.triu(attn_mask, diagonal=1)
+    reference_output = reference_model(pt_attention_input, positions[0], None, mask=attn_mask_torch)
 
     passing, pcc_message = comp_pcc(reference_output, tt_output_torch, pcc)
 
@@ -167,4 +165,71 @@ def test_attention_inference(
     else:
         logger.warning(f"Attention Failed!")
         all_tests_pass = False
-    assert all_tests_pass, f"PCC value is lower than {pcc} for some of the outputs. Check Warnings!"
+
+    check_kv_cache = True  # May want to disable: Issue #10648
+    if check_kv_cache:
+        # PyTorch output --------------------------------------------------------------------
+        pytorch_layer_present = [
+            reference_model.cache_k.clone().permute(0, 2, 1, 3),  # [batch_size, n_kv_heads, seq, head_dim]
+            reference_model.cache_v.clone().permute(0, 2, 1, 3),  # [batch_size, n_kv_heads, seq, head_dim]
+        ]
+        # TT hardware execution -------------------------------------------------------------
+        if paged_attention:
+            tt_layer_present = [
+                (
+                    ttnn.to_torch(
+                        cache,
+                        mesh_composer=ttnn.ConcatMesh2dToTensor(
+                            mesh_device,
+                            dims=(1, 3) if model_args.is_galaxy else (0, 1),
+                            mesh_shape=model_args.cluster_shape,
+                        ),
+                    )[reverse_permutation][:, : model_args.n_kv_heads, :, : model_args.head_dim]
+                    .reshape(
+                        model_args.max_batch_size,
+                        paged_attention_config.max_num_blocks // model_args.max_batch_size,
+                        model_args.n_kv_heads,
+                        paged_attention_config.block_size,
+                        model_args.head_dim,
+                    )
+                    .transpose(1, 2)
+                    .reshape(model_args.max_batch_size, model_args.n_kv_heads, -1, model_args.head_dim)[
+                        :batch_size, ...
+                    ]
+                )
+                for cache in tt_model.layer_past
+            ]
+        else:
+            tt_layer_present = [
+                ttnn.to_torch(
+                    cache,
+                    mesh_composer=ttnn.ConcatMesh2dToTensor(
+                        mesh_device,
+                        dims=(1, 0) if model_args.is_galaxy else (0, 1),
+                        mesh_shape=model_args.cluster_shape,
+                    ),
+                )[:batch_size, :, :, :]
+                for cache in tt_model.layer_past
+            ]
+
+        for i, (cache_pt, cache_tt) in enumerate(zip(pytorch_layer_present, tt_layer_present)):
+            cache_length_to_check = min(model_args.max_seq_len, generation_start_pos + generation_length + 1)
+            cache_pt = cache_pt[:, :, generation_start_pos:cache_length_to_check, :]
+            cache_tt = cache_tt[:, :, generation_start_pos:cache_length_to_check, :]
+            does_pass, output_pcc = comp_pcc(cache_pt, cache_tt, pcc)
+            if i == 0:
+                logger.info(f"K cache output: {output_pcc}")
+            else:
+                logger.info(f"V cache output: {output_pcc}")
+
+            if does_pass:
+                logger.info(f"KV Cache Passed!")
+            else:
+                logger.warning(f"KV Cache Failed! PCC value is lower than {pcc}")
+                all_tests_pass = False
+
+    if all_tests_pass:
+        logger.info("Attention output Passed!")
+    else:
+        logger.warning("Attention output Failed!")
+        assert all_tests_pass, f"PCC value is lower than {pcc} for some of the outputs. Check Warnings!"
