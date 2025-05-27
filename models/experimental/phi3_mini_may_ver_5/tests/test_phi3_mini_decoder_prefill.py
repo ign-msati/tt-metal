@@ -14,7 +14,7 @@ from models.utility_functions import (
 )
 from models.utility_functions import skip_for_grayskull
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, get_rot_transformation_mat, PagedAttentionConfig
-from transformers import AutoModelForCausalLM, DynamicCache
+
 
 @torch.no_grad()
 @skip_for_grayskull("Requires wormhole_b0 to run")
@@ -66,10 +66,7 @@ def test_decoder_inference(
 
     state_dict = model_args.load_state_dict()
 
-    LAYER_INDEX = 0
-    base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-    reference_model = base_model.model.layers[LAYER_INDEX]
-    # reference_model = model_args.reference_decoder()
+    reference_model = model_args.reference_decoder()
 
     generation_start_pos = 0
     generation_length = 1
@@ -142,18 +139,10 @@ def test_decoder_inference(
         )
 
         # Reference model
-        position_ids = torch.arange(0, max_seq_len, 1, dtype=torch.long).unsqueeze(0)
-        # torch_attn_mask = torch.triu(torch.ones(1, 1, max_seq_len, max_seq_len) * float('-inf'), diagonal=1)
-        ref_past_key_value = DynamicCache()
-        ref_output, _ = reference_model(
-            pt_decode_input,
-            past_key_value=ref_past_key_value,
-            position_ids=position_ids,
-            use_cache=True,
-        )
-        # attn_mask = torch.full((max_seq_len, max_seq_len), torch.finfo(torch.float32).min)
-        # attn_mask_torch = torch.triu(attn_mask, diagonal=1)
-        # ref_output = reference_model(pt_decode_input, positions[0], freqs_cis_i, mask=attn_mask_torch)
+        positions = torch.LongTensor(range(max_seq_len))
+        attn_mask = torch.full((max_seq_len, max_seq_len), torch.finfo(torch.float32).min)
+        attn_mask_torch = torch.triu(attn_mask, diagonal=1)
+        ref_output = reference_model(pt_decode_input, positions[0], None, mask=attn_mask_torch)
         # Run TT model
         tt_out = tt_model(decode_input, None, rot_mats, user_id=0, mode="prefill", page_table=page_table_tt)
         tt_out = ttnn.to_torch(

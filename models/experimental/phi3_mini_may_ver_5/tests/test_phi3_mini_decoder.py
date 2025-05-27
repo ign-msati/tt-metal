@@ -15,7 +15,6 @@ from models.utility_functions import (
     comp_allclose,
 )
 from models.utility_functions import skip_for_grayskull
-from transformers import AutoModelForCausalLM, DynamicCache
 
 
 @torch.no_grad()
@@ -69,10 +68,7 @@ def test_decoder_inference(
 
     state_dict = model_args.load_state_dict()
 
-    # reference_model = model_args.reference_decoder()
-    LAYER_INDEX = 0
-    base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-    reference_model = base_model.model.layers[LAYER_INDEX]
+    reference_model = model_args.reference_decoder()
 
     generation_start_pos = 0
     generation_length = 10
@@ -146,7 +142,6 @@ def test_decoder_inference(
         ),
     )
 
-    ref_past_key_value = DynamicCache()
     for i in range(generation_length):
         logger.info(f"[Decoder] Generating token {i}")
 
@@ -179,13 +174,8 @@ def test_decoder_inference(
         tt_output_torch = tt_out[:, 0:1, : model_args.max_batch_size, : model_args.dim].view(-1, 1, model_args.dim)
 
         # Reference model
-        position_ids = torch.LongTensor([[i]] * batch_size)
-        ref_output, ref_past_key_value = reference_model(
-            pt_decode_input,
-            past_key_value=ref_past_key_value,
-            position_ids=position_ids,
-            use_cache=True
-        )
+        ref_output = reference_model(pt_decode_input, current_pos[0], None, mask=None)
+
         passing, pcc_message = comp_pcc(ref_output, tt_output_torch)
 
         logger.info(comp_allclose(ref_output, tt_output_torch))

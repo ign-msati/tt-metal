@@ -5,8 +5,10 @@
 import os
 import ttnn
 import math
+import torch
 
 from models.tt_transformers.tt.model_config import ModelArgs
+from models.common.lightweightmodule import LightweightModule
 
 
 class Phi3MiniModelArgs(ModelArgs):
@@ -101,7 +103,6 @@ class Phi3MiniModelArgs(ModelArgs):
         self.vision_patch_size = 14
         self.vision_in_channels = 3
 
-
     def __repr__(self):
         return f"""ModelArgs(
             dim={self.dim},
@@ -117,3 +118,32 @@ class Phi3MiniModelArgs(ModelArgs):
             max_batch_size={self.max_batch_size},
             max_seq_len={self.max_seq_len},
         )"""
+
+    def reference_decoder(self):
+        model = self.reference_transformer(wrap=False)
+        layer = model.model.layers[0]
+        wrapper = HfDecoderWrapper(layer, self.head_dim)
+        return wrapper
+
+
+class HfDecoderWrapper(LightweightModule):
+    def __init__(self, decoder, head_dim):
+        from transformers import DynamicCache
+
+        self.decoder = decoder
+        self.head_dim = head_dim
+        self.past_key_values = DynamicCache()
+
+    def forward(self, x, start_pos, freqs_cis_i, mask=None):
+        position_ids = torch.tensor([list(range(start_pos, start_pos + x.shape[1]))] * x.shape[0])
+        if mask is not None:
+            while len(mask.shape) < 4:
+                mask = mask.unsqueeze(0)
+        result, self.past_key_values = self.decoder.forward(
+            x,
+            past_key_value=self.past_key_values,
+            use_cache=True,
+            position_ids=position_ids,
+            attention_mask=mask,
+        )
+        return result
