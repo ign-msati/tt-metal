@@ -7,18 +7,14 @@ from loguru import logger
 import os
 import ttnn
 from models.tt_transformers.tt.attention import Attention
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import RotarySetup
-# from models.tt_transformers.tt.rope import RotarySetup
-from models.tt_transformers.tt.model_config import ModelArgs
-# from models.experimental.phi3_mini_may_ver_5.tt.model_config import ModelArgs
-# from models.experimental.phi3_mini.tt.model_config import ModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import Phi3MiniRotarySetup
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from models.tt_transformers.tt.common import PagedAttentionConfig
 from models.utility_functions import (
     comp_pcc,
     comp_allclose,
 )
 from models.utility_functions import skip_for_grayskull
-from transformers import AutoModelForCausalLM, DynamicCache
 
 
 @torch.no_grad()
@@ -36,11 +32,11 @@ from transformers import AutoModelForCausalLM, DynamicCache
     "paged_attention",
     (
         True,
-        # False,
+        False,
     ),
     ids=(
         "paged_attention",
-        # "default_attention",
+        "default_attention",
     ),
 )
 @pytest.mark.parametrize(
@@ -67,36 +63,29 @@ def test_attention_inference(
 ):
     dtype = ttnn.bfloat8_b
     pcc = 0.99
-    seq_len = 1
 
-    model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
+    model_args = Phi3MiniModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
     model_args.n_layers = 1  # For the unit test, just run a single layer
 
     state_dict = model_args.load_state_dict()
+    reference_model = model_args.reference_attention()
 
-    # first_layer_prefix = model_args.get_state_dict_prefix("Attention", 0) + "."
-    # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
-    # partial_state_dict = {
-    #     k[len(first_layer_prefix) :]: v for k, v in state_dict.items() if (k.startswith(first_layer_prefix))
-    # }
-
-    # reference_model = model_args.reference_attention()
-    base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-    reference_model = base_model.model.layers[0].self_attn
+    seq_len = 1
 
     generation_start_pos = 0
     generation_length = 10
     all_tests_pass = True
 
-    # Setup RoPE transformation matrices
-    rope_setup = RotarySetup(
-        mesh_device,
-        batch_size,
-        model_args.head_dim,
-        model_args.max_seq_len,
-        model_args.rope_theta,
-        model_args.rope_ext_scaling,
-        model_args.orig_context_len,
+    rope_setup = Phi3MiniRotarySetup(
+        device=mesh_device,
+        batch_size=batch_size,
+        head_dim=model_args.head_dim,
+        max_seq_len=max_seq_len,
+        rope_theta=model_args.rope_theta,
+        scale_factor=model_args.rope_scaling_factor,
+        ext_scale_tensors=model_args.rope_scaling,
+        orig_context_len=model_args.orig_context_len,
+        datatype=ttnn.bfloat16,
     )
 
     transformation_mats = rope_setup.get_both_trans_mats()
@@ -140,11 +129,20 @@ def test_attention_inference(
         paged_attention_config=paged_attention_config,
     )
 
+    # Initial positions
+    current_pos = torch.tensor([generation_start_pos for _ in range(batch_size)])
+    current_pos_tensor = ttnn.from_torch(
+        current_pos,
+        device=mesh_device,
+        dtype=ttnn.int32,
+        mesh_mapper=ttnn.ShardTensor2dMesh(
+            mesh_device,
+            dims=(None, 0) if (model_args.is_galaxy and batch_size > 1) else (None, None),
+            mesh_shape=model_args.cluster_shape,
+        ),
+    )
 
-    avg_tsu = 0.0
-    ref_past_key_value = DynamicCache()
     for i in range(generation_length):
-        current_pos = torch.tensor([i for _ in range(batch_size)])
         pt_attention_input = torch.randn(batch_size, seq_len, model_args.dim)
 
         tt_attention_input = pt_attention_input.clone()
@@ -152,21 +150,12 @@ def test_attention_inference(
         attention_input = model_args.prepare_residual_tensor_decode(
             tt_attention_input,
             model_args.model_config["SHARDED_ATTN_INPUT_MEMCFG"],
-            force_replicated=False if model_args.is_galaxy else True
+            force_replicated=False if model_args.is_galaxy else True,
         )
 
         # Get cos/sin matrices for the current position of each user
-        current_pos_tensor = ttnn.from_torch(
-            current_pos,
-            device=mesh_device,
-            dtype=ttnn.int32,
-            mesh_mapper=ttnn.ShardTensor2dMesh(
-                mesh_device,
-                dims=(None, None),
-                mesh_shape=model_args.cluster_shape,
-            ),
-        )
         rot_mats = rope_setup.get_rot_mats(current_pos)
+
         tt_out = tt_model(
             attention_input,
             current_pos_tensor,
@@ -181,14 +170,7 @@ def test_attention_inference(
         )
         tt_output_torch = tt_out[:, 0:1, : model_args.max_batch_size, : model_args.dim].view(-1, 1, model_args.dim)
 
-
-        # In this test all users have the same position (if using batch > 1)
-        position_ids = torch.LongTensor([[i]] * batch_size)
-        reference_output, _, ref_past_key_value = reference_model(
-            pt_attention_input,
-            past_key_value=ref_past_key_value,
-            position_ids=position_ids,
-        )
+        reference_output = reference_model(pt_attention_input, current_pos[0], None, mask=None)
 
         passing, pcc_message = comp_pcc(reference_output, tt_output_torch, pcc)
 
@@ -200,7 +182,75 @@ def test_attention_inference(
             logger.warning(f"[pos={current_pos[0]}] Attention Failed!")
             all_tests_pass = False
 
-    # Finish profiling at the end of inference for all repeated batches
+        # Increment position
+        current_pos = torch.tensor([generation_start_pos + i + 1 for _ in range(batch_size)])
+        current_pos_tensor = ttnn.from_torch(
+            current_pos,
+            device=mesh_device,
+            dtype=ttnn.int32,
+            mesh_mapper=ttnn.ShardTensor2dMesh(
+                mesh_device,
+                dims=(None, 0) if (model_args.is_galaxy and batch_size > 1) else (None, None),
+                mesh_shape=model_args.cluster_shape,
+            ),
+        )
+
+        check_kv_cache = True
+        if check_kv_cache:
+            # PyTorch output --------------------------------------------------------------------
+            pytorch_layer_present = [
+                reference_model.cache_k.clone().permute(0, 2, 1, 3),  # [batch_size, n_kv_heads, seq, head_dim]
+                reference_model.cache_v.clone().permute(0, 2, 1, 3),  # [batch_size, n_kv_heads, seq, head_dim]
+            ]
+            # TT hardware execution -------------------------------------------------------------
+            if paged_attention:
+                tt_layer_present = [
+                    (
+                        ttnn.to_torch(
+                            cache,
+                            mesh_composer=ttnn.ConcatMesh2dToTensor(
+                                mesh_device,
+                                dims=(1, 3) if model_args.is_galaxy else (0, 1),
+                                mesh_shape=model_args.cluster_shape,
+                            ),
+                        )[reverse_permutation][:, : model_args.n_kv_heads, :, : model_args.head_dim]
+                        .reshape(
+                            model_args.max_batch_size,
+                            paged_attention_config.max_num_blocks // model_args.max_batch_size,
+                            model_args.n_kv_heads,
+                            paged_attention_config.block_size,
+                            model_args.head_dim,
+                        )
+                        .transpose(1, 2)
+                        .reshape(model_args.max_batch_size, model_args.n_kv_heads, -1, model_args.head_dim)[
+                            :batch_size, ...
+                        ]
+                    )
+                    for cache in tt_model.layer_past
+                ]
+            else:
+                tt_layer_present = [
+                    ttnn.to_torch(
+                        cache,
+                        mesh_composer=ttnn.ConcatMesh2dToTensor(
+                            mesh_device,
+                            dims=(1, 0) if model_args.is_galaxy else (0, 1),
+                            mesh_shape=model_args.cluster_shape,
+                        ),
+                    )[:batch_size, :, :, :]
+                    for cache in tt_model.layer_past
+                ]
+            for label, cache_pt, cache_tt in zip(["K", "V"], pytorch_layer_present, tt_layer_present):
+                cache_length_to_check = min(model_args.max_seq_len, generation_start_pos + i + 1)
+                cache_pt = cache_pt[:, :, generation_start_pos:cache_length_to_check, :]
+                cache_tt = cache_tt[:, :, generation_start_pos:cache_length_to_check, :]
+                does_pass, output_pcc = comp_pcc(cache_pt, cache_tt, pcc)
+                logger.info(f"{label} cache output: {output_pcc}")
+                if does_pass:
+                    logger.info(f"{label} cache Passed!")
+                else:
+                    logger.warning(f"{label} Cache Failed! PCC value is lower than {pcc}")
+                    all_tests_pass = False
 
     if all_tests_pass:
         logger.info("Attention output Passed!")
