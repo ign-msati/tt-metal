@@ -124,7 +124,6 @@ def test_model_inference(
         max_seq_len=max_seq_len,
         max_batch_size=batch_size,
     )
-    # import pdb; pdb.set_trace()
 
     # Define minimum PCC for each iteration
     if layers == 1:
@@ -164,15 +163,13 @@ def test_model_inference(
             encoded_prompts = tpl['input_ids'] # [model_args.encode_prompt(prompt) for prompt in prompts]
         else:
             encoded_prompts = [model_args.encode_prompt(prompt, instruct=False) for prompt in prompts]
-    # import pdb; pdb.set_trace()
-    # print(f"{instruct=}")
-    # print(f"{chat=}")
-    # print(f"{encoded_prompts.shape=}")
+
     if run_ref_pt:
         LAYER_INDEX = 0
         LAYER_INDEX_SPLIT=32
 
         # base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
+        # reference_model = model_args.reference_transformer()
         base_model = model_args.reference_ign_model
         # reference_model = base_model.model[1:]
         # torch_model_embedded = base_model.model.embed_tokens
@@ -186,9 +183,6 @@ def test_model_inference(
     embd = model_args.reference_embedding()
     embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
 
-    # generation_start_pos = 64*1024
-    # generation_start_pos = 128
-    # generation_start_pos = 128*1024
     generation_start_pos = 0
     generation_length = iterations
 
@@ -263,8 +257,6 @@ def test_model_inference(
     )
 
     for i in range(generation_length):
-        print("iterations *************^^^^^^^^^^^^^^^^", i)
-        iteration_time_start = time()
         logger.info(f"[Model] Generating token {i}")
 
         decode_input = model_args.prepare_residual_tensor_decode(
@@ -283,13 +275,7 @@ def test_model_inference(
             page_table=page_table_tt,
         )
 
-        iteration_time = time() - iteration_time_start
-        tokens_per_second_per_user = 1 / iteration_time
-        print("Token per second *************^^^^^^^^^^^^^^^^", tokens_per_second_per_user)
-        logger.info(
-                # f"Iteration {iteration}: {1000*iteration_time:.2f}ms @ {tokens_per_second_per_user:.1f} tok/s/user  ({batch_size*tokens_per_second_per_user:.1f} tok/s throughput)
-                f"Iteration {i}: {1000*iteration_time:.2f}ms @ {tokens_per_second_per_user:.1f} tok/s/user  ({1*tokens_per_second_per_user:.1f} tok/s throughput)"
-        )
+
 
         # Convert ttnn tensor to torch tensor
         mesh_composer = ttnn.ConcatMesh2dToTensor(
@@ -305,36 +291,31 @@ def test_model_inference(
 
         if run_ref_pt:  # Run reference model
             # In this test all users have the same position
-
+            if 1:
             # ref_output = reference_model(pt_decode_input, current_pos[0])
+                positions = torch.LongTensor([[current_pos]] * batch)
+                torch_output_states=pt_decode_input
+                # print(f"{positions.shape=}")
+                # print(f"{torch_output_states.shape=}")
+                for layer in range(LAYER_INDEX_SPLIT):
+                    # print("layer done********************", layer)
+                    #############################################33
+                    torch_output_states = torch_model_decode[layer](torch_output_states, 
+                                                position_ids=positions, 
+                                                # position_ids=current_pos[0], 
+                                                past_key_value=ref_past_key_value,
+                                            #  past_key_value=ref_past_key_value[i],
+                                                use_cache=True)
+                    torch_output_states=torch_output_states[0]
 
-            ###############################################################33
-             #################################################33
-        # torch_output_embedded = torch_model_embedded(sample_input_torch)#,
-            positions = torch.LongTensor([[current_pos]] * batch)
-            torch_output_states=pt_decode_input
-            print(f"{positions.shape=}")
-            print(f"{torch_output_states.shape=}")
-            for layer in range(LAYER_INDEX_SPLIT):
-                # print("layer done********************", layer)
-                #############################################33
-                torch_output_states = torch_model_decode[layer](torch_output_states, 
-                                            position_ids=positions, 
-                                            # position_ids=current_pos[0], 
-                                            past_key_value=ref_past_key_value,
-                                        #  past_key_value=ref_past_key_value[i],
-                                            use_cache=True)
-                torch_output_states=torch_output_states[0]
-            # reference_output=torch_output_states
-            #     ###############################################
-
-            torch_output_states = torch_model_norm(torch_output_states)#,
-            ref_output = torch_model_lm_head(torch_output_states)#,
+                torch_output_states = torch_model_norm(torch_output_states)#,
+                ref_output = torch_model_lm_head(torch_output_states)#,
+            else:
+                  ref_output = base_model(inputs_embeds=pt_decode_input)
+                  ref_output=ref_output[0]
         ######################################################
-            ###############################################################33
 
         # Increment position
-        # current_pos = torch.tensor([generation_start_pos + i  for _ in range(batch)])
         current_pos = torch.tensor([generation_start_pos + i + 1 for _ in range(batch)])
         current_pos_tensor = ttnn.from_torch(
             current_pos,
@@ -471,7 +452,7 @@ def test_model_inference(
             logger.info("[ttnn generation User 0] " + tokenizer.decode(all_outputs).replace("\n", "\\n"))
             if run_ref_pt:
                 logger.info("[Ref generation User 0] " + tokenizer.decode(all_outputs_ref).replace("\n", "\\n"))
-    # print(f"{chat=}")
+
     if run_ref_pt:
         if all_tests_pass:
             logger.info(f"All {generation_length} decode iterations Passed!")

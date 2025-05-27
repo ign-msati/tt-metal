@@ -8,7 +8,8 @@ from loguru import logger
 import os
 import ttnn
 from models.tt_transformers.tt.mlp import MLP
-from models.tt_transformers.tt.model_config import ModelArgs
+# from models.tt_transformers.tt.model_config import ModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from models.utility_functions import (
     comp_pcc,
     comp_allclose,
@@ -42,11 +43,11 @@ from transformers import AutoModelForCausalLM, DynamicCache
     # (32,),
     (1,),
 )
-def test_mlp_inference(seq_len, batch_size, mesh_device, use_program_cache, reset_seeds, ensure_gc):
+def test_mlp_inference(seq_len, batch_size, mesh_device, use_program_cache, reset_seeds):
     dtype = ttnn.bfloat8_b
     mode = "decode" if seq_len <= 32 else "prefill"
 
-    model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=128)
+    model_args = Phi3MiniModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=128)
     model_args.n_layers = 1
     state_dict = model_args.load_state_dict()
 
@@ -58,7 +59,6 @@ def test_mlp_inference(seq_len, batch_size, mesh_device, use_program_cache, rese
 
     base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
     reference_model = base_model.model.layers[0].mlp
-    # reference_model = model_args.reference_mlp()
 
     print("args.dim",model_args.dim)
     print("args.num_devices",model_args.num_devices)
