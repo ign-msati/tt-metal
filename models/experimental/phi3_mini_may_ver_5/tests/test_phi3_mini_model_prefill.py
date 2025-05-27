@@ -10,13 +10,10 @@ import ttnn
 
 
 from models.tt_transformers.tt.common import (
-    # preprocess_inputs_prefill,
     PagedAttentionConfig,
-    # sample_host,
-    # create_tt_model,
+
 )
 
-# from models.tt_transformers.tt.common import (
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import (
     # PagedAttentionConfig,
     create_tt_model,
@@ -27,7 +24,6 @@ from models.utility_functions import (
     comp_pcc,
 )
 from models.utility_functions import skip_for_grayskull
-from transformers import AutoModelForCausalLM, DynamicCache
 
 @torch.no_grad()
 @skip_for_grayskull("Requires wormhole_b0 to run")
@@ -127,10 +123,7 @@ def test_model_inference(
         if num_layers != 1 and seq_len != 4096:
             pytest.skip("CI only runs full model for 4k seq len to reduce CI pipeline load")
 
-    ref_past_key_value = DynamicCache()
     run_ref_pt = True  # Flag to run reference PyTorch model and compare PCC
-    # run_ref_pt = False  # Flag to run reference PyTorch model and compare PCC
-    # cache_pcc = True  # Flag to measure KV cache PCC for all layers
     cache_pcc = False  # Flag to measure KV cache PCC for all layers
 
     dtype = ttnn.bfloat8_b
@@ -202,35 +195,10 @@ def test_model_inference(
     if run_ref_pt:
         logger.info("Loading reference model...")
         state_dict_prefix = model_args.get_state_dict_prefix("", None)
-        # reference_state_dict = {
-        #     k[len(state_dict_prefix) :]: v
-        #     for k, v in state_dict.items()
-        #     if (
-        #         any([f"{state_dict_prefix}layers.{i}." in k for i in range(model_args.n_layers)])
-        #         or any(
-        #             [
-        #                 f"{state_dict_prefix}{name}" in k
-        #                 for name in ["tok_embeddings.weight", "norm.weight", "output.weight"]
-        #             ]
-        #         )
-        #     )
-        # }
 
-        #################################################################
+        reference_model = model_args.reference_ign_model
         # reference_model = model_args.reference_transformer()
-        # reference_model.load_state_dict(reference_state_dict)
 
-        LAYER_INDEX_SPLIT=32
-
-        # base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-        base_model = model_args.reference_ign_model
-        # reference_model = base_model.model[1:]
-        # torch_model_embedded = base_model.model.embed_tokens
-        torch_model_decode = base_model.model.layers[:LAYER_INDEX_SPLIT]
-        torch_model_norm = base_model.model.norm
-        torch_model_lm_head = base_model.lm_head
-
-        ###################################################################
         # Embedding on host
         embd = model_args.reference_embedding()
         embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
@@ -255,42 +223,16 @@ def test_model_inference(
     if run_ref_pt:
         # Run reference model
         logger.info(f"Running reference model...")
-        if 1:
-            # positions = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0)
-            ref_output = base_model(encoded_prompt_tensor.unsqueeze(0))
-            ref_output = ref_output[0]
-        else :
-            pt_prefill_input = embd(encoded_prompt_tensor).view(batch_size, seq_len, -1)
-            # torch_output_embedded = torch_model_embedded(sample_input_torch)#,
-            # positions = torch.LongTensor([[start_pos]] * batch_size)
-            positions = torch.arange(0, seq_len, 1, dtype=torch.long).unsqueeze(0)
-            torch_output_states=pt_prefill_input
-            print(f"{positions.shape=}")
-            print(f"{torch_output_states.shape=}")
-            for layer in range(LAYER_INDEX_SPLIT):
-                # print("layer done********************", layer)
-                #############################################33
-                torch_output_states = torch_model_decode[layer](torch_output_states, 
-                                            position_ids=positions, 
-                                            # position_ids=current_pos[0], 
-                                            past_key_value=ref_past_key_value,
-                                        #  past_key_value=ref_past_key_value[i],
-                                            use_cache=True)
-                torch_output_states=torch_output_states[0]
 
-            torch_output_states = torch_model_norm(torch_output_states)#,
-            ref_output = torch_model_lm_head(torch_output_states)#,
-        # import pdb; pdb.set_trace()
-        ######################################################
-        #################################################################
-        print(f"{ref_output.shape=}")
+        ref_output = reference_model(encoded_prompt_tensor.unsqueeze(0))
+        ref_output = ref_output[0]
+
         ref_output = ref_output[:, -1:, :]  # Get last token since TT model only returns the last token
         logger.info(f"Finished running reference model.")
 
         # Measure PCC if also running reference model
         all_tests_pass = True
-        print(f"{ref_output.shape=}")
-        print(f"{tt_output_torch.shape=}")
+
         # Check output pcc
         passing, pcc_message = comp_pcc(ref_output, tt_output_torch, expec_out_pcc)
         logger.info(f"Output PCC: {pcc_message}")
