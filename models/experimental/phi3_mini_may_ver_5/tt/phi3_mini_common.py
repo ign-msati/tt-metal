@@ -1,9 +1,10 @@
 import torch
 import ttnn
 from models.tt_transformers.tt.common import gather_cos_sin, get_rot_transformation_mat, PagedAttentionConfig
-from models.tt_transformers.tt.model_config import ModelArgs
-
-
+# from models.tt_transformers.tt.model_config import ModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
+from loguru import logger
+import math
 def precompute_freqs(dim: int, end: int, theta: float = 10000.0, scale_factor: int=1.0, ext_scale_tensor: torch.tensor=torch.tensor([1.0])):
     """
     Precompute the frequency tensor for sine and cosine values with given dimensions, grok-style.
@@ -53,6 +54,101 @@ def get_prefill_rot_mat(head_dim, mesh_device, seq_len, theta, scale_factor, ext
     return rot_mats
 
 
+def preprocess_inputs_prefill(
+    input_prompts,
+    tokenizer,
+    model_args,
+    instruct,
+    max_generated_tokens,
+    max_prefill_len=128 * 1024,
+):
+    """
+    Run tokenizer on inputs, and create embeddings for the first token of each input
+    """
+    # To avoid going out of memory, clip the max prefill length by the maximum number of tokens that will be generated
+    if max_prefill_len == 128 * 1024:
+        max_prefill_len = 128 * 1024 - max_generated_tokens
+
+    encoded_prompts = [
+        model_args[idx % len(model_args)].encode_prompt(prompt, instruct=instruct)
+        for idx, prompt in enumerate(input_prompts)
+    ]
+
+    # Print the length of encoded prompts
+    logger.info("Encoded prompt lengths:" + ", ".join(str(len(prompt)) for prompt in encoded_prompts))
+
+    prompt_lens = [len(x) for x in encoded_prompts]
+    min_prompt_len = min(prompt_lens)
+    max_prompt_len = max(prompt_lens)
+
+    # To avoid running out of memory when giving prompts larger than the maximum, clip to max_prefill_len
+    if min_prompt_len > max_prefill_len:
+        logger.info(f"Left-clipping prompts to {max_prefill_len}")
+        if instruct:
+            # We need to allow a few tokens for the system prompt and the special turn tokens for assistant and user;
+            # to find out how big those will be, we will:
+            # 1. Tokenize the entire prompt with non-instruct tokenization
+            # 2. Calculate overhead = length of instruct tokenization - length of non-instruct tokenization
+            # 3. Shorten the tokenized clipped prompt by the overhead and convert back to text
+            # 4. Tokenize the result with instruct tokenization
+            # 5. Assert that the length of this is equal to the max_prefill_len
+            raw_prompts = [
+                model_args[idx % len(model_args)].encode_prompt(prompt, instruct=False)
+                for idx, prompt in enumerate(input_prompts)
+            ]
+            overhead = [len(e) - len(r) for e, r in zip(encoded_prompts, raw_prompts)]
+            shortened = [
+                tokenizer[idx % len(model_args)].decode(e[-(max_prefill_len - o) :])
+                for idx, e, o in enumerate(zip(raw_prompts, overhead))
+            ]
+            encoded_prompts = [
+                model_args[idx % len(model_args)].encode_prompt(prompt, instruct=instruct)
+                for idx, prompt in enumerate(shortened)
+            ]
+            assert all(
+                len(e) == max_prefill_len for e in encoded_prompts
+            ), f"Clipped prompts are not of the correct length, expected {max_prefill_len} but got {[len(e) for e in encoded_prompts]}"
+        else:
+            encoded_prompts = [encod[-max_prefill_len:] for encod in encoded_prompts]
+
+        # Update prompt lengths
+        prompt_lens = [len(x) for x in encoded_prompts]
+        min_prompt_len = min(prompt_lens)
+        max_prompt_len = max(prompt_lens)
+    for m in model_args:
+        assert (
+            max_prompt_len <= m.max_seq_len
+        ), f"Max prompt length {max_prompt_len} exceeds model max seq len {m.max_seq_len}"
+    assert min_prompt_len > 0, "Minimum prompt length must be greater than 0"
+    assert min_prompt_len <= max_prompt_len, f"Minimum prompt length {min_prompt_len} exceeds max len {max_prompt_len}"
+
+    logger.info(f"# of users: {len(encoded_prompts)}")
+    input_tokens_prefill = []
+    decoding_pos = []
+    prefill_lens = []
+
+    # Always prefill the nearest power of 2 for each user. This means that the majority of cases we will prefill more tokens than needed.
+    # To avoid issues, we keep track of the decoding position to decode correctly the user's prompt
+    # Prefill size is padded to nearest power of 2 of max prompt lenght
+    prefill_seq_len = max(2 ** math.ceil(math.log(max_prompt_len, 2)), 128)
+    for i, encoded in enumerate(encoded_prompts):
+
+        # Initial prefill tensors full of pad tokens
+        input_tokens_prefill_i = torch.full((1, prefill_seq_len), 0, dtype=torch.int32)
+        input_tokens_prefill_i[0, : len(encoded[:])] = torch.tensor(encoded[:]).to(input_tokens_prefill_i)
+        input_tokens_prefill.append(input_tokens_prefill_i)
+
+        # Keep the correct decoding position of each user
+        decoding_pos.append(len(encoded))
+        prefill_lens.append(prefill_seq_len)
+
+    return (
+        input_tokens_prefill,
+        encoded_prompts,
+        decoding_pos,
+        prefill_lens,
+    )
+
 def create_tt_model(
     mesh_device,
     instruct,
@@ -65,7 +161,7 @@ def create_tt_model(
     num_layers=None,
 ):
     from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Phi3Transformer
-    tt_model_args = ModelArgs(
+    tt_model_args = Phi3MiniModelArgs(
         mesh_device,
         instruct=instruct,
         max_batch_size=max_batch_size,
