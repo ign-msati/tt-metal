@@ -6,22 +6,15 @@ import pytest
 from loguru import logger
 import os
 import ttnn
-from models.tt_transformers.tt.common import (
-    # get_prefill_rot_mat,
-    get_rot_transformation_mat,
-    PagedAttentionConfig,
-)
 from models.tt_transformers.tt.decoder import TransformerBlock
-from models.tt_transformers.tt.model_config import ModelArgs
-# from models.demos.t3000.llama2_70b.reference.llama.llama31_8b.model import precompute_freqs_cis
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from models.utility_functions import (
     comp_pcc,
     comp_allclose,
 )
 from models.utility_functions import skip_for_grayskull
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, get_rot_transformation_mat, PagedAttentionConfig
 from transformers import AutoModelForCausalLM, DynamicCache
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat
-
 
 @torch.no_grad()
 @skip_for_grayskull("Requires wormhole_b0 to run")
@@ -68,23 +61,15 @@ def test_decoder_inference(
     dtype = ttnn.bfloat8_b
     batch_size = 1  # For prefill we only support batch_size = 1
 
-    model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
+    model_args = Phi3MiniModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
     model_args.n_layers = 1
 
     state_dict = model_args.load_state_dict()
 
-    # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
-    # first_layer_prefix = model_args.get_state_dict_prefix("TransformerBlock", 0)
-    # partial_state_dict = {
-    #     k[len(first_layer_prefix) :]: v for k, v in state_dict.items() if (k.startswith(first_layer_prefix))
-    # }
-
-    # reference_model = model_args.reference_decoder()
-    # reference_model.load_state_dict(partial_state_dict)
-
     LAYER_INDEX = 0
     base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
     reference_model = base_model.model.layers[LAYER_INDEX]
+    # reference_model = model_args.reference_decoder()
 
     generation_start_pos = 0
     generation_length = 1
@@ -95,9 +80,11 @@ def test_decoder_inference(
         model_args.head_dim,
         mesh_device,
         max_seq_len,
-        model_args.rope_ext_scaling,
+        model_args.rope_theta,
+        model_args.rope_scaling_factor,
+        model_args.rope_scaling,
         model_args.orig_context_len,
-        start_pos=0
+        start_pos=generation_start_pos
     )
     transformation_mat_torch = get_rot_transformation_mat(model_args.head_dim)
     transformation_mats_prefill = ttnn.as_tensor(
@@ -153,16 +140,8 @@ def test_decoder_inference(
         decode_input = model_args.prepare_residual_tensor_prefill(
             tt_decode_input,
         )
-        # positions = torch.LongTensor(range(max_seq_len))
-        # freqs_cis_i = precompute_freqs_cis(
-        #     model_args.head_dim,
-        #     model_args.max_seq_len * 2,
-        #     model_args.rope_theta,
-        #     model_args.rope_scaling_factor,
-        # )[positions]
 
         # Reference model
-
         position_ids = torch.arange(0, max_seq_len, 1, dtype=torch.long).unsqueeze(0)
         # torch_attn_mask = torch.triu(torch.ones(1, 1, max_seq_len, max_seq_len) * float('-inf'), diagonal=1)
         ref_past_key_value = DynamicCache()
