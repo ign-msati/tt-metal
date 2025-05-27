@@ -8,62 +8,16 @@ from loguru import logger
 import os
 import ttnn
 from models.tt_transformers.tt.common import (
-    # get_prefill_rot_mat,
     PagedAttentionConfig,
-    preprocess_inputs_prefill,
 )
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat
-# from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, PagedAttentionConfig, preprocess_inputs_prefill
-# from models.tt_transformers.tt.model import Transformer
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Transformer
-# from models.tt_transformers.tt.model import Transformer
-from models.tt_transformers.tt.model_config import ModelArgs, DecodersPrecision, parse_decoder_json
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, preprocess_inputs_prefill
+# from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Transformer
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Phi3Transformer as Transformer
+from models.tt_transformers.tt.model_config import  DecodersPrecision, parse_decoder_json
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from pathlib import Path
+from models.tt_transformers.tests.test_accuracy import get_accuracy_thresholds
 
-
-def get_accuracy_thresholds(model_args, optimizations):
-    """Parse accuracy thresholds from PERF.md for the given model, optimization mode, and device."""
-    # Read PERF.md
-    perf_file = Path(__file__).parent.parent / "PERF.md"
-    with open(perf_file, "r") as f:
-        content = f.read()
-
-    # Split into sections based on optimization mode
-    sections = content.split("## ")
-    if callable(optimizations):
-        optimizations = optimizations(model_args)
-    first_decoder_conf = optimizations.decoder_optimizations[0]
-    target_section = next(s for s in sections if s.lower().startswith(f"{first_decoder_conf.__name__}\n"))
-
-    # Parse the table and find the row for our model and device
-    # Potential lines have the form "| Llama3.1-8b    | T3K    | 91        | 99        | 49.8          |"
-    base_model_name = model_args.base_model_name
-    device_name = model_args.device_name
-    correct_line = (
-        lambda line: "|" in line
-        and base_model_name.lower() in line.split("|")[1].strip().lower()
-        and device_name.lower() in line.split("|")[2].strip().lower()
-        and not "(DP=".lower() in line.lower()  # ignore DP/HP report for now
-    )
-    rows = [
-        line.split("|")[1:]  # Each row starts with a separator
-        for line in target_section.split("\n")
-        if correct_line(line)
-    ]
-    if not rows:
-        raise ValueError(
-            f"Could not find accuracy data for {base_model_name} on {device_name} in {optimizations.__name__} mode"
-        )
-
-    assert (
-        len(rows) == 1
-    ), f"Found multiple rows for {base_model_name} on {device_name} in {optimizations.__name__} mode in PERF.md"
-    row = rows[0]
-    top1_acc = float(row[2].strip())
-    top5_acc = float(row[3].strip())
-
-    # Allow for rounding
-    return top1_acc - 0.5, top5_acc - 0.5
 
 
 @torch.no_grad()
@@ -151,7 +105,7 @@ def test_tt_model_acc(
         optimizations = optimizations
 
     # Load model args and tokenizer
-    model_args = ModelArgs(mesh_device, optimizations=optimizations, max_batch_size=batch_size, max_seq_len=max_seq_len)
+    model_args = Phi3MiniModelArgs(mesh_device, optimizations=optimizations, max_batch_size=batch_size, max_seq_len=max_seq_len)
     logger.info(f"Optimizations: {model_args.optimizations._full_name}")
 
     tokenizer = model_args.tokenizer
@@ -166,7 +120,7 @@ def test_tt_model_acc(
     if use_reference_file:
         # Existing reference file loading logic
         # reference_data_file = f"models/tt_transformers/tests/reference_outputs/{model_args.model_name}.refpt"
-        reference_data_file = "models/tt_transformers/tests/reference_outputs/reference_outputs.pt"
+        reference_data_file = "models/experimental/phi3_mini_may_ver_5/tests/reference_output/Phi-3-mini-128k-instruct.refpt"
         logger.info(f"Loading reference data from {reference_data_file}")
         assert os.path.exists(reference_data_file)
         reference_data = torch.load(reference_data_file)
@@ -250,14 +204,25 @@ def test_tt_model_acc(
         pt_prefill_input = [embd(input_tokens_prefill_pt[b]).view(1, prefill_lens[b], -1) for b in range(1)]
 
         # Pre-compute the rotational embedding matrix and send to device
+        # rot_mats_prefill = get_prefill_rot_mat(
+        #     model_args.head_dim,
+        #     mesh_device,
+        #     prefill_lens[0],
+        #     # model_args.rope_theta,
+        #     # model_args.rope_scaling_factor,
+        #     model_args.rope_ext_scaling,
+        #     model_args.orig_context_len,
+        # )
+            # pre-compute the rotational embedding matrix and send to device
         rot_mats_prefill = get_prefill_rot_mat(
             model_args.head_dim,
             mesh_device,
-            prefill_lens[0],
-            # model_args.rope_theta,
-            # model_args.rope_scaling_factor,
-            model_args.rope_ext_scaling,
+            max_seq_len,
+            model_args.rope_theta,
+            model_args.rope_scaling_factor,
+            model_args.rope_scaling,
             model_args.orig_context_len,
+            start_pos=0
         )
 
         ###############################333

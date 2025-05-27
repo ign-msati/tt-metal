@@ -14,6 +14,7 @@ from models.tt_transformers.tt.common import (
 # from models.tt_transformers.tt.model_config import ModelArgs, DecodersPrecision
 from models.tt_transformers.tt.model_config import  DecodersPrecision
 from models.tt_transformers.tt.model_config import ModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 # from models.experimental.phi3_mini_may_ver_5.tt.model_config import ModelArgs
 # from models.tt_transformers.tt.model import Transformer
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Phi3Transformer
@@ -115,7 +116,7 @@ def test_model_inference(
     instruct=True
     dummy_weights = True if weights == "random" else False
     dummy_weights=False
-    model_args = ModelArgs(
+    model_args = Phi3MiniModelArgs(
         mesh_device,
         # instruct=instruct,
         dummy_weights=dummy_weights,
@@ -143,19 +144,7 @@ def test_model_inference(
         model_args.n_layers = layers
     state_dict = model_args.load_state_dict()
     state_dict_prefix = model_args.get_state_dict_prefix("", None)
-    # reference_state_dict = {
-    #     k[len(state_dict_prefix) :]: v
-    #     for k, v in state_dict.items()
-    #     if (
-    #         any([f"{state_dict_prefix}layers.{i}." in k for i in range(model_args.n_layers)])
-    #         or any(
-    #             [
-    #                 f"{state_dict_prefix}{name}" in k
-    #                 for name in ["tok_embeddings.weight", "norm.weight", "output.weight"]
-    #             ]
-    #         )
-    #     )
-    # }
+
 
     # prompts = ["This is a test"] * model_args.max_batch_size
     prompts = ["Capital of india"] * model_args.max_batch_size
