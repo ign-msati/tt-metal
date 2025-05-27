@@ -6,14 +6,10 @@ import pytest
 from loguru import logger
 import os
 import ttnn
-from models.tt_transformers.tt.common import (
-    precompute_freqs,
-    PagedAttentionConfig,
-)
-from models.tt_transformers.tt.model_config import ModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import PagedAttentionConfig
 from models.tt_transformers.tt.decoder import TransformerBlock
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import RotarySetup
-# from models.tt_transformers.tt.rope import RotarySetup
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import Phi3MiniRotarySetup
 from models.utility_functions import (
     comp_pcc,
     comp_allclose,
@@ -68,19 +64,12 @@ def test_decoder_inference(
 ):
     dtype = ttnn.bfloat8_b
 
-    model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
+    model_args = Phi3MiniModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=max_seq_len)
     model_args.n_layers = 1
 
     state_dict = model_args.load_state_dict()
 
-    # # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
-    # first_layer_prefix = model_args.get_state_dict_prefix("TransformerBlock", 0)
-    # partial_state_dict = {
-    #     k[len(first_layer_prefix) :]: v for k, v in state_dict.items() if (k.startswith(first_layer_prefix))
-    # }
     # reference_model = model_args.reference_decoder()
-    # reference_model.load_state_dict(partial_state_dict)
-
     LAYER_INDEX = 0
     base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
     reference_model = base_model.model.layers[LAYER_INDEX]
@@ -89,15 +78,16 @@ def test_decoder_inference(
     generation_length = 10
     all_tests_pass = True
 
-    # Setup RoPE transformation matrices
-    rope_setup = RotarySetup(
-        mesh_device,
-        model_args.max_batch_size,
-        model_args.head_dim,
-        model_args.max_seq_len,
-        model_args.rope_theta,
-        model_args.rope_ext_scaling,
-        model_args.orig_context_len,
+    rope_setup = Phi3MiniRotarySetup(
+        device=mesh_device,
+        batch_size=batch_size,
+        head_dim=model_args.head_dim,
+        max_seq_len=max_seq_len,
+        rope_theta=model_args.rope_theta,
+        scale_factor=model_args.rope_scaling_factor,
+        ext_scale_tensors=model_args.rope_scaling,
+        orig_context_len=model_args.orig_context_len,
+        datatype=ttnn.bfloat16,
     )
     transformation_mats = rope_setup.get_both_trans_mats()
 
