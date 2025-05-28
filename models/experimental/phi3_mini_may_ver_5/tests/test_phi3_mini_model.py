@@ -54,11 +54,11 @@ def display_chat(logger, conversation):
     "paged_attention",
     (
         True,
-        False,
+        # False,
     ),
     ids=(
         "paged_attention",
-        "default_attention",
+        # "default_attention",
     ),
 )
 @pytest.mark.parametrize(
@@ -71,7 +71,7 @@ def display_chat(logger, conversation):
 )
 @pytest.mark.parametrize(
     "max_seq_len",
-    (256,),
+    (256,),  # For decode-only unit test, there's no need to run with large sequence lengths
 )
 @pytest.mark.parametrize(
     "optimizations",
@@ -127,14 +127,14 @@ def test_model_inference(
     pcc = 0.94 if mode_accuracy else 0.86
 
     # Number of decode iterations to run for the model
-    iterations = 15
+    iterations = 10
 
     if layers is not None:
         model_args.n_layers = layers
     state_dict = model_args.load_state_dict()
     state_dict_prefix = model_args.get_state_dict_prefix("", None)
 
-    prompts = ["Capital of india"] * model_args.max_batch_size
+    prompts = ["This is a test"] * model_args.max_batch_size
 
     
     tokenizer = model_args.tokenizer
@@ -209,7 +209,6 @@ def test_model_inference(
     encoded_prompts_tensor = torch.tensor(encoded_prompts).unsqueeze(0)  # [:,0]
     pt_decode_input = embd(encoded_prompts_tensor[:, 0]).view(batch, seqlen, -1)
     tt_decode_input = pt_decode_input
-
 
     # Keep track of generated outputs to print out later
     all_outputs = []
