@@ -7,8 +7,10 @@ import ttnn
 import math
 import torch
 
+from loguru import logger
 from models.tt_transformers.tt.model_config import ModelArgs
 from models.common.lightweightmodule import LightweightModule
+from models.tt_transformers.tt.common import nearest_multiple
 
 
 class Phi3MiniModelArgs(ModelArgs):
@@ -23,11 +25,11 @@ class Phi3MiniModelArgs(ModelArgs):
     ):
         super().__init__(
             mesh_device,
-            instruct=False,
-            dummy_weights=False,
-            max_batch_size=1,
-            max_seq_len=1024 * 128,
-            optimizations=None,
+            instruct=instruct,
+            dummy_weights=dummy_weights,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            optimizations=optimizations,
         )
 
     def _set_params_from_dict(self, params):
