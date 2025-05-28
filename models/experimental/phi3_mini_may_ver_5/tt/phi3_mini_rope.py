@@ -103,7 +103,8 @@ class Phi3MiniRotarySetup(RotarySetup):
         embedding_layout = ttnn.TILE_LAYOUT
 
         # Position ids need to be in float32 for ttnn.gt/lt to give ttnn.tensor(1) when true
-        float_rot_idxs = ttnn.to_layout(rot_idxs, ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+        float_rot_idxs = ttnn.to_layout(rot_idxs, ttnn.TILE_LAYOUT)
+        float_rot_idxs = ttnn.typecast(float_rot_idxs, ttnn.float32)
 
         # Highest position id between the batches
         max_rot_id = ttnn.max(float_rot_idxs) # [1, batch]
