@@ -24,6 +24,9 @@ from models.utility_functions import (
     comp_pcc,
 )
 from models.utility_functions import skip_for_grayskull
+from models.tt_transformers.tt.model_config import HfModelWrapper
+# from models.experimental.phi3_mini_may_ver_5.tt.model_config import HfModelWrapper
+
 
 @torch.no_grad()
 @skip_for_grayskull("Requires wormhole_b0 to run")
@@ -185,7 +188,8 @@ def test_model_inference(
     # Load prompt
     current_file_path = os.path.abspath(__file__)
     current_file_dir = os.path.dirname(current_file_path)
-    prompt_file = os.path.join(current_file_dir, "tale-of-two-cities.txt.bz2")
+    # prompt_file = os.path.join(current_file_dir, "tale-of-two-cities.txt.bz2")
+    prompt_file = "models/tt_transformers/tests/tale-of-two-cities.txt.bz2"
     with bz2.open(prompt_file, "rt", encoding="utf-8") as f:
         prompt = f.read()
     encoded_prompt = model_args.encode_prompt(prompt, instruct=instruct)[:seq_len]
@@ -196,11 +200,12 @@ def test_model_inference(
         logger.info("Loading reference model...")
         state_dict_prefix = model_args.get_state_dict_prefix("", None)
 
-        reference_model = model_args.reference_ign_model
-        # reference_model = model_args.reference_transformer()
+        # reference_model = model_args.reference_ign_model
+        reference_transformer_model = model_args.reference_transformer(wrap=False)
+        reference_model = HfModelWrapper(reference_transformer_model, model_args.head_dim)
 
         # Embedding on host
-        embd = model_args.reference_embedding()
+        embd = model_args.reference_embedding(reference_transformer_model)
         embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
         logger.info("Finished loading reference model.")
 
@@ -221,14 +226,20 @@ def test_model_inference(
     logger.info(f"Finished running TT model.")
 
     if run_ref_pt:
+
         # Run reference model
         logger.info(f"Running reference model...")
-
-        ref_output = reference_model(encoded_prompt_tensor.unsqueeze(0))
-        ref_output = ref_output[0]
-
+        pt_prefill_input = embd(encoded_prompt_tensor).view(batch_size, seq_len, -1)
+        ref_output = reference_model(pt_prefill_input, start_pos)
         ref_output = ref_output[:, -1:, :]  # Get last token since TT model only returns the last token
         logger.info(f"Finished running reference model.")
+
+        # # Run reference model
+        # logger.info(f"Running reference model...")
+        # ref_output = reference_model(encoded_prompt_tensor.unsqueeze(0))
+        # ref_output = ref_output[0]
+        # ref_output = ref_output[:, -1:, :]  # Get last token since TT model only returns the last token
+        # logger.info(f"Finished running reference model.")
 
         # Measure PCC if also running reference model
         all_tests_pass = True
