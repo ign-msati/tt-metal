@@ -23,7 +23,7 @@ from models.tt_transformers.tt.common import (
     sample_host,
 )
 
-from models.experimental.phi3_mini_ahm_ver_5.tt.phi3_mini_common import (
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import (
     create_tt_model,
     preprocess_inputs_prefill,
 )
