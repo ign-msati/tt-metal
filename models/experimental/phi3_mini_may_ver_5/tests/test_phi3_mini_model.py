@@ -21,8 +21,8 @@ from models.utility_functions import (
 from models.utility_functions import skip_for_grayskull, skip_for_blackhole
 from models.tt_transformers.tt.model_config import HfModelWrapper
 
-
 import re
+
 
 def parse_chat_output(text):
     pattern = r"<\|(?P<role>user|assistant)\|>\s*(?P<message>.*?)(?=<\|(?:user|assistant|end)\|>|$)"
@@ -79,10 +79,7 @@ def display_chat(logger, conversation):
         lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
-    ids=[
-        "performance",
-        "accuracy"
-    ],
+    ids=["performance", "accuracy"],
 )
 @pytest.mark.parametrize(
     "mesh_device",
@@ -104,6 +101,7 @@ def test_model_inference(
     mesh_device,
     use_program_cache,
     reset_seeds,
+    ensure_gc,
     request,
     parse_chat = False
 ):
@@ -154,8 +152,6 @@ def test_model_inference(
         # Embedding on host
         embd = model_args.reference_embedding()
 
-    embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})    
-
     generation_start_pos = 0
     generation_length = iterations
 
@@ -200,7 +196,6 @@ def test_model_inference(
 
     if run_ref_pt:
         all_tests_pass = True
-        
 
     seqlen = 1  # Generating one token per user at a time
     batch = model_args.max_batch_size
