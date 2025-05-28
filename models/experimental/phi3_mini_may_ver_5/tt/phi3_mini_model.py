@@ -3,21 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import torch
-from tqdm import tqdm
-from models.tt_transformers.tt.decoder import TransformerBlock
-from models.common.rmsnorm import RMSNorm
-import ttnn
-from models.common.lightweightmodule import LightweightModule
-from models.tt_transformers.tt.distributed_norm import DistributedNorm
-from models.tt_transformers.tt.lm_head import LMHead
-from models.tt_transformers.tt.common import copy_host_to_device
-from models.tt_transformers.tt.embedding import Embedding
-from models.tt_transformers.tt.model_config import TensorGroup
 from models.tt_transformers.tt.model import Transformer
-
-
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import Phi3MiniRotarySetup
+
 
 class Phi3Transformer(Transformer):
     def __init__(self, args, dtype, mesh_device, state_dict, weight_cache_path, paged_attention_config=None, use_paged_kv_cache=False):
@@ -47,7 +35,6 @@ class Phi3Transformer(Transformer):
         """
         Inputs are torch tensors or python types. This function returns ttnn
         tensors on device.
-        TODO: Debate whether this function is responsible for padding
         """
 
         tokens = tokens.reshape(1, 1, 1, -1)
@@ -62,7 +49,11 @@ class Phi3Transformer(Transformer):
         tokens_embd = self.embd(tokens)
         tokens_embd = ttnn.unsqueeze_to_4D(tokens_embd)
 
-        if S > self.rope_setup.orig_context_len:
+        # Slice the rot mats to the prefill seqlen
+        assert (
+            self.rope_setup.cos_matrix["long_scaled"].shape[2] >= (start_pos + S)
+        ), f"Padded prefill end idx {start_pos + S} exceeds max seq len {self.rope_setup.cos_matrix["long_scaled"].shape[2]}"
+        if (start_pos + S) > self.rope_setup.orig_context_len:
             tt_rot_mats_prefill = [
                 self.rope_setup.cos_matrix["long_scaled"][:, :, start_pos : start_pos + S, :],
                 self.rope_setup.sin_matrix["long_scaled"][:, :, start_pos : start_pos + S, :],

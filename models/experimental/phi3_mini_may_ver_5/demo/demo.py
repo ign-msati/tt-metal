@@ -1,28 +1,21 @@
 # SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from pathlib import Path
 from loguru import logger
 from datetime import datetime
-import hashlib
-import requests
-import json
 
 import torch
 import pytest
 import os
 import ttnn
 
-
 from models.tt_transformers.tt.generator import Generator, SamplingParams
 from models.tt_transformers.tt.model_config import DecodersPrecision, parse_decoder_json
 
 from models.tt_transformers.tt.common import (
-    # preprocess_inputs_prefill,
     PagedAttentionConfig,
     sample_host,
 )
-
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import (
     create_tt_model,
     preprocess_inputs_prefill,
@@ -30,86 +23,7 @@ from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import (
 
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.demos.utils.llm_demo_utils import create_benchmark_data
-from models.tt_transformers.demo.simple_text_demo import load_and_cache_context,load_inputs,create_tt_page_table
-# def load_and_cache_context(context_url, cache_dir, max_length=None):
-#     cache_file = cache_dir / hashlib.md5(context_url.encode()).hexdigest()
-
-#     if cache_file.exists():
-#         with open(cache_file, "r") as f:
-#             context_text = f.read()
-#         logger.info(f"Loaded context from cache: {context_url}")
-#     else:
-#         try:
-#             response = requests.get(context_url)
-#             if response.status_code == 200:
-#                 context_text = response.text
-#                 with open(cache_file, "w") as f:
-#                     f.write(context_text)
-#                 logger.info(f"Downloaded and cached context: {context_url}")
-#             else:
-#                 logger.warning(f"Failed to fetch context from URL: {context_url}. Status code: {response.status_code}")
-#                 context_text = ""
-#         except Exception as e:
-#             logger.error(f"Error fetching context from URL: {context_url}. Error: {str(e)}")
-#             context_text = ""
-
-#     # Clip the context to the max length provided
-#     if max_length:
-#         context_text = context_text[:max_length]
-#         logger.info(f"Clipped the context text to {max_length} characters")
-
-#     return context_text
-
-
-# # load input prompts from json, return as a list
-# def load_inputs(user_input, batch, instruct):
-#     if isinstance(user_input, str):
-#         with open(user_input, "r") as f:
-#             user_input = json.load(f)
-
-#     if len(user_input) < batch:
-#         logger.warning(
-#             f"Number of users in the file is less than the provided batch={batch}. Repeating the prompts to match the batch size."
-#         )
-#         user_input = user_input * batch
-
-#     in_prompt = []
-#     cache_dir = Path("models/tt_transformers/demo/context_cache")
-#     cache_dir.mkdir(parents=True, exist_ok=True)
-
-#     # The demo supports a custom prompt file, where the context is provided by a link to a book from the gutenberg project
-#     # It clips the excerpt to the max length provided to allow testing different long context lengthts
-#     for i in range(batch):
-#         prompt = user_input[i]["prompt"]
-#         if "context" in user_input[i]:
-#             if "max_length" in user_input[i]:  # Clip the context to the max length provided
-#                 context_text = load_and_cache_context(
-#                     user_input[i]["context"], cache_dir, max_length=user_input[i]["max_length"]
-#                 )
-#             else:
-#                 context_text = load_and_cache_context(user_input[i]["context"], cache_dir)
-#             if instruct:
-#                 prompt = (
-#                     "```" + context_text + "```\n\n" + prompt
-#                 )  # Add the markdown block to the context to comply with the prompt
-#             else:
-#                 prompt = context_text
-#         in_prompt.append(prompt)
-#     return in_prompt
-
-
-# def create_tt_page_table(global_batch_size, data_parallel, paged_attention_config: PagedAttentionConfig):
-#     page_table = None
-
-#     if paged_attention_config:
-#         # Implied shuffling of blocks
-#         permutation = torch.randperm(paged_attention_config.max_num_blocks)
-#         # Page table which maps virtual blocks to physical
-#         reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
-#         page_table = reverse_permutation.reshape(
-#             global_batch_size, paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
-#         )
-#     return page_table
+from models.tt_transformers.demo.simple_text_demo import load_inputs, create_tt_page_table
 
 
 def prepare_generator_args(
@@ -202,108 +116,98 @@ def prepare_generator_args(
             False,  # ci_only
             1,
         ),
-        # (  # Batch-32 run (Throughput) - 32 users, small prompt
-        #     "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
-        #     True,  # instruct mode
-        #     1,  # repeat_batches
-        #     1024,  # max_seq_len
-        #     32,  # batch_size
-        #     200,  # max_generated_tokens
-        #     True,  # paged_attention
-        #     {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
-        #     {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
-        #     True,  # stop_at_eos
-        #     False,  # ci_only
-        #     1,  # data_parallel
-        # ),
-        # (  # Long-context run - Single user, long prompt (adapted to the model being used and architecture)
-        #     "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",  # input_prompts
-        #     # "models/tt_transformers/demo/sample_prompts/input_data_long_16k.json",  # input_prompts
-        #     True,  # instruct mode
-        #     1,  # repeat_batches
-        #     128 * 1024,  # max_seq_len
-        #     # 128 * 1024,  # max_seq_len
-        #     # 64 * 1024,  # max_seq_len
-        #     1,  # batch_size
-        #     200,  # max_generated_tokens
-        #     True,  # paged_attention
-        #     # {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params
-        #     {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
-        #     # {"page_block_size": 32, "page_max_num_blocks_per_dp": 2048},  # page_params
-        #     {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
-        #     True,  # stop_at_eos
-        #     False,  # ci_only
-        #     1,  # data_parallel
-        # ),
-        # (  # Batch-1 run (Reasoning) - single user, small prompt, long thinking time
-        #     "models/tt_transformers/demo/input_data_questions_reasoning.json",  # input_prompts
-        #     True,  # instruct mode
-        #     1,  # repeat_batches
-        #     16 * 1024,  # max_seq_len
-        #     1,  # batch_size
-        #     15000,  # max_generated_tokens
-        #     True,  # paged_attention
-        #     {
-        #         "page_block_size": 32,
-        #         "page_max_num_blocks_per_dp": 1024,
-        #     },  # page_params  # TODO This will be serviced by vLLM
-        #     {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
-        #     False,  # stop_at_eos
-        #     False,  # ci_only
-        #     1,  # data_parallel
-        # ),
-        # (  # CI Batch-1 run - Measures the performance of a single user over 4096 iterations
-        #     "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
-        #     True,  # instruct mode
-        #     1,  # repeat_batches
-        #     8192,  # max_seq_len
-        #     32,  # batch_size
-        #     4096,  # max_generated_tokens
-        #     True,  # paged_attention
-        #     {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
-        #     {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
-        #     False,  # stop_at_eos
-        #     True,  # ci_only
-        #     1,  # data_parallel
-        # ),
-        # (  # CI Batch-32 run - Measures the performance of a 32 users over 4096 iterations
-        #     "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
-        #     True,  # instruct mode
-        #     1,  # repeat_batches
-        #     2000,  # max_seq_len
-        #     32,  # batch_size
-        #     1024,  # max_generated_tokens  # TODO Update this to 4096, and make sure it fits in DRAM with correct page_params
-        #     True,  # paged_attention  # TODO Find the correct paged_attn params to avoid hangs in this config with long context generation
-        #     {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params
-        #     {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
-        #     False,  # stop_at_eos
-        #     True,  # ci_only
-        #     1,  # data_parallel
-        # ),
+        (  # Batch-32 run (Throughput) - 32 users, small prompt
+            "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
+            True,  # instruct mode
+            1,  # repeat_batches
+            1024,  # max_seq_len
+            32,  # batch_size
+            200,  # max_generated_tokens
+            True,  # paged_attention
+            {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
+            {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
+            True,  # stop_at_eos
+            False,  # ci_only
+            1,  # data_parallel
+        ),
+        (  # Long-context run - Single user, long prompt (adapted to the model being used and architecture)
+            "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",  # input_prompts
+            True,  # instruct mode
+            1,  # repeat_batches
+            128 * 1024,  # max_seq_len
+            1,  # batch_size
+            200,  # max_generated_tokens
+            True,  # paged_attention
+            {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params
+            {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
+            True,  # stop_at_eos
+            False,  # ci_only
+            1,  # data_parallel
+        ),
+        (  # Batch-1 run (Reasoning) - single user, small prompt, long thinking time
+            "models/tt_transformers/demo/input_data_questions_reasoning.json",  # input_prompts
+            True,  # instruct mode
+            1,  # repeat_batches
+            16 * 1024,  # max_seq_len
+            1,  # batch_size
+            1500,  # max_generated_tokens
+            True,  # paged_attention
+            {
+                "page_block_size": 32,
+                "page_max_num_blocks_per_dp": 1024,
+            },  # page_params  # TODO This will be serviced by vLLM
+            {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
+            False,  # stop_at_eos
+            False,  # ci_only
+            1,  # data_parallel
+        ),
+        (  # CI Batch-1 run - Measures the performance of a single user over 4096 iterations
+            "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
+            True,  # instruct mode
+            1,  # repeat_batches
+            8192,  # max_seq_len
+            32,  # batch_size
+            4096,  # max_generated_tokens
+            True,  # paged_attention
+            {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
+            {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
+            False,  # stop_at_eos
+            True,  # ci_only
+            1,  # data_parallel
+        ),
+        (  # CI Batch-32 run - Measures the performance of a 32 users over 4096 iterations
+            "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
+            True,  # instruct mode
+            1,  # repeat_batches
+            2000,  # max_seq_len
+            32,  # batch_size
+            1024,  # max_generated_tokens  # TODO Update this to 4096, and make sure it fits in DRAM with correct page_params
+            True,  # paged_attention  # TODO Find the correct paged_attn params to avoid hangs in this config with long context generation
+            {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params
+            {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
+            False,  # stop_at_eos
+            True,  # ci_only
+            1,  # data_parallel
+        ),
     ],
     ids=[
-        # "batch-1",  # latency
-        # "batch-32",  # throughput
+        "batch-1",  # latency
+        "batch-32",  # throughput
         "long-context",  # max-length
-        # "reasoning-1",  # reasoning
-        # "ci-1",  # CI batch 1
-        # "ci-32",  # CI batch 32
-        # "DP-4-b1",  # DP 4 latency
-        # "DP-8-b1",  # DP 8 latency
-        # "DP-4-b32",  # DP 4 throughput
-        # "ci-b1-DP-4",  # CI DP 4 batch 1
-        # "ci-b1-DP-8",  # CI DP 8 batch 1
+        "reasoning-1",  # reasoning
+        "ci-1",  # CI batch 1
+        "ci-32",  # CI batch 32
     ],
 )
 @pytest.mark.parametrize(
     "optimizations",
     [
         lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
-        # lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
+        lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
     ids=[
         "performance", 
-        #  "accuracy"
+         "accuracy"
          ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 23887872, "num_command_queues": 2}], indirect=True)
@@ -347,48 +251,36 @@ def test_demo_text(
     if os.environ.get("MESH_DEVICE") == "TG" and batch_size not in [1, 32]:
         pytest.skip("TG only supports batch 1 and 32")
 
+    if ("long" in test_id) and os.environ.get("MESH_DEVICE") == "N150":
+        pytest.skip("N150 is not able run long context test")
+
     enable_trace = True  # Use tracing for better perf
     print_to_file = False  # Enable this flag to print the output of all users to a file
 
-    # Override parameters from command line if they are provided
-    input_prompts = input_prompts
-    # input_prompts = request.config.getoption("--input_prompts") or input_prompts
-    # if request.config.getoption("--instruct") in [
-    #     0,
-    #     1,
-    # ]:  # If the flag is provided, use it. Take an int instead of bool due to parser limitations
-    # instruct = request.config.getoption("--instruct")
-    instruct=True
-    repeat_batches = repeat_batches
-    max_seq_len = max_seq_len
-    batch_size =  batch_size
-    max_generated_tokens = max_generated_tokens
-    paged_attention =   paged_attention
-    page_params = page_params
-    sampling_params =  sampling_params
-    # json_config_file = request.config.getoption("--decoder_config_file")
-    # instruct = request.config.getoption("--instruct")
-    # repeat_batches = request.config.getoption("--repeat_batches") or repeat_batches
-    # max_seq_len = request.config.getoption("--max_seq_len") or max_seq_len
-    # batch_size = request.config.getoption("--batch_size") or batch_size
-    # max_generated_tokens = request.config.getoption("--max_generated_tokens") or max_generated_tokens
-    # paged_attention = request.config.getoption("--paged_attention") or paged_attention
-    # page_params = request.config.getoption("--page_params") or page_params
-    # sampling_params = request.config.getoption("--sampling_params") or sampling_params
-    # json_config_file = request.config.getoption("--decoder_config_file")
+    input_prompts = request.config.getoption("--input_prompts") or input_prompts
+    if request.config.getoption("--instruct") in [
+        0,
+        1,
+    ]:  # If the flag is provided, use it. Take an int instead of bool due to parser limitations
+        instruct = request.config.getoption("--instruct")
+    repeat_batches = request.config.getoption("--repeat_batches") or repeat_batches
+    max_seq_len = request.config.getoption("--max_seq_len") or max_seq_len
+    batch_size = request.config.getoption("--batch_size") or batch_size
+    max_generated_tokens = request.config.getoption("--max_generated_tokens") or max_generated_tokens
+    paged_attention = request.config.getoption("--paged_attention") or paged_attention
+    page_params = request.config.getoption("--page_params") or page_params
+    sampling_params = request.config.getoption("--sampling_params") or sampling_params
+    json_config_file = request.config.getoption("--decoder_config_file")
+    if json_config_file:
+        optimizations = parse_decoder_json(json_config_file)
+    else:
+        optimizations = request.config.getoption("--optimizations") or optimizations
 
-    # if json_config_file:
-    #     optimizations = parse_decoder_json(json_config_file)
-    # else:
-    #     optimizations = request.config.getoption("--optimizations") or optimizations
-    optimizations =  optimizations
-
-    # if request.config.getoption("--stop_at_eos") in [
-    #     0,
-    #     1,
-    # ]:  # If the flag is provided, use it. Take an int instead of bool due to parser limitations
-    # stop_at_eos = request.config.getoption("--stop_at_eos")
-    stop_at_eos=0
+    if request.config.getoption("--stop_at_eos") in [
+        0,
+        1,
+    ]:  # If the flag is provided, use it. Take an int instead of bool due to parser limitations
+        stop_at_eos = request.config.getoption("--stop_at_eos")
     num_devices = mesh_device.get_num_devices() if isinstance(mesh_device, ttnn.MeshDevice) else 1
     global_batch_size = batch_size * data_parallel  # input batch_size is interpreted as size per DP group
 
@@ -396,11 +288,6 @@ def test_demo_text(
     if data_parallel > num_devices or num_devices % data_parallel != 0:
         pytest.skip(f"Invalid number of DP groups: {data_parallel}, for {num_devices} devices")
 
-    llama_dir = os.getenv("LLAMA_DIR")
-    if is_ci_env and num_devices == 32 and (data_parallel > 4 or (data_parallel == 4 and "3.1-70B" not in llama_dir)):
-        pytest.skip("CI runs only Llama3 70b DP = 4, TP = 8 on TG")
-    if is_ci_env and num_devices == 8 and data_parallel > 1 and not ("3.2-1B" in llama_dir or "3.1-8B" in llama_dir):
-        pytest.skip("CI runs only hybrid Llama3 1b and 8b on T3K")
     if is_ci_env and data_parallel > 1 and batch_size > 1:
         pytest.skip("CI runs only hybrid with batch 1 per submesh")
 
@@ -483,9 +370,6 @@ def test_demo_text(
                     k_cache = ttnn.mul(k_cache, 0, output_tensor=k_cache)
                     v_cache = ttnn.mul(v_cache, 0, output_tensor=v_cache)
 
-        for tokens in input_tokens_prefill_pt:
-            print(f"{tokens.shape=}")
-
         input_tokens_prefill_pt = torch.stack(input_tokens_prefill_pt).view(global_batch_size, -1)
 
         logger.info("Starting prefill warmup...")
@@ -495,7 +379,6 @@ def test_demo_text(
             page_table=page_table,
             kv_cache=tt_kv_cache,
             prompt_lens=decoding_pos,
-            # min_chunk_size=1024,
         )
         profiler.end(f"compile_prefill", iteration=batch_idx)
         logger.info("Finished prefill warmup")
@@ -722,82 +605,10 @@ def test_demo_text(
         f"Average speed: {round(avg_decode_iteration_time * 1000, 2)}ms @ {round(decode_tok_s_user, 2)} tok/s/user ({round(decode_tok_s, 2)} tok/s throughput)"
     )
 
-    # Benchmark targets
-    supported_models = ["Llama3.2-1B", "Llama3.2-3B", "Llama3.1-8B", "Llama3.2-11B", "Llama3.1-70B"]
-    supported_devices = ["N150", "P150", "P300", "N300", "P150x4", "T3K", "TG"]
-
     tt_device_name = model_args[0].device_name
 
-    if model_args[0].base_model_name in supported_models:
-        assert tt_device_name in supported_devices, f"Device {tt_device_name} not supported"
-
-        # Set the target times to first token for every combination of device and model
-        target_prefill_tok_s = {
-            "N150_Llama3.2-1B": 1050,  # TODO Update target
-            "N300_Llama3.2-1B": 1050,  # TODO Update target
-            "T3K_Llama3.2-1B": 1050,  # TODO Update target
-            "TG_Llama3.2-1B": 1050,  # TODO Update target
-            #
-            "N150_Llama3.2-3B": 1050,  # TODO Update target
-            "N300_Llama3.2-3B": 1050,  # TODO Update target
-            "T3K_Llama3.2-3B": 1050,  # TODO Update target
-            "TG_Llama3.2-3B": 1050,  # TODO Update target
-            #
-            "N150_Llama3.1-8B": 1050,
-            "P150_Llama3.1-8B": 1050,
-            "N300_Llama3.1-8B": 1050,
-            "P300_Llama3.1-8B": 1050,
-            "T3K_Llama3.1-8B": 1050,
-            "TG_Llama3.1-8B": 1050,
-            #
-            "N150_Llama3.2-11B": 1050,  # TODO Update target
-            "N300_Llama3.2-11B": 1050,  # TODO Update target
-            "T3K_Llama3.2-11B": 1050,  # TODO Update target
-            "TG_Llama3.2-11B": 1050,  # TODO Update target
-            #
-            "N150_Llama3.1-70B": 1050,  # TODO Update target
-            "N300_Llama3.1-70B": 1050,  # TODO Update target
-            "T3K_Llama3.1-70B": 1050,  # TODO Update target
-            "TG_Llama3.1-70B": 1050,  # TODO Update target
-        }[f"{tt_device_name}_{model_args[0].base_model_name}"]
-
-        # Set the target decode timesfor every combination of device and model
-        target_decode_tok_s_u = {
-            "N150_Llama3.2-1B": 160,  # TODO Update target
-            "N300_Llama3.2-1B": 250,  # TODO Update target
-            "T3K_Llama3.2-1B": 300,  # TODO Update target
-            "TG_Llama3.2-1B": 300,  # TODO Update target
-            #
-            "N150_Llama3.2-3B": 60,  # TODO Update target
-            "N300_Llama3.2-3B": 100,  # TODO Update target
-            "T3K_Llama3.2-3B": 150,  # TODO Update target
-            "TG_Llama3.2-3B": 150,  # TODO Update target
-            #
-            "N150_Llama3.1-8B": 23,  # TODO Update target
-            "P150_Llama3.1-8B": 23,  # TODO Update target
-            "N300_Llama3.1-8B": 38,
-            "P300_Llama3.1-8B": 38,
-            "T3K_Llama3.1-8B": 45,
-            "TG_Llama3.1-8B": 45,  # TODO Update target
-            #
-            "N150_Llama3.2-11B": 23,
-            "N300_Llama3.2-11B": 38,  # TODO Update target
-            "T3K_Llama3.2-11B": 45,  # TODO Update target
-            "TG_Llama3.2-11B": 45,  # TODO Update target
-            #
-            "T3K_Llama3.1-70B": 20,  # TODO Update target
-            "TG_Llama3.1-70B": 20,  # TODO Update target
-        }[f"{tt_device_name}_{model_args[0].base_model_name}"]
-
-        target_decode_tok_s = target_decode_tok_s_u * global_batch_size
-        targets = {
-            "prefill_t/s": target_prefill_tok_s,
-            "decode_t/s": target_decode_tok_s,
-            "decode_t/s/u": target_decode_tok_s_u,
-        }
-    else:
-        logger.warning(f"Model {model_args[0].base_model_name} not does not have performance targets set")
-        targets = {}
+    logger.warning(f"Model {model_args[0].base_model_name} not does not have performance targets set")
+    targets = {}
 
     # Save benchmark data for CI dashboard
     if is_ci_env:
