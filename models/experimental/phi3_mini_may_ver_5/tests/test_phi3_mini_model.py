@@ -18,10 +18,24 @@ from models.utility_functions import (
     comp_pcc,
     comp_allclose,
 )
-from transformers import DynamicCache
 from models.utility_functions import skip_for_grayskull, skip_for_blackhole
-from transformers import DynamicCache
 from models.tt_transformers.tt.model_config import HfModelWrapper
+
+
+import re
+
+def parse_chat_output(text):
+    pattern = r"<\|(?P<role>user|assistant)\|>\s*(?P<message>.*?)(?=<\|(?:user|assistant|end)\|>|$)"
+    matches = re.finditer(pattern, text, re.DOTALL)
+    return [(match.group('role'), match.group('message').strip()) for match in matches]
+
+
+def display_chat(logger, conversation):
+    for role, message in conversation:
+        if role == 'user':
+            logger.info(f"👤 User: {message}")
+        elif role == 'assistant':
+            logger.info(f"🤖 Assistant: {message}")
 
 
 @torch.no_grad()
@@ -32,23 +46,19 @@ from models.tt_transformers.tt.model_config import HfModelWrapper
 @pytest.mark.parametrize(
     "weights, layers",
     [
-        # ("random", 1),
         ("instruct", None),
     ],
-    ids=[
-        # "quick", 
-         "full"
-         ],
+    ids=["full"],
 )
 @pytest.mark.parametrize(
     "paged_attention",
     (
         True,
-        # False,
+        False,
     ),
     ids=(
         "paged_attention",
-        # "default_attention",
+        "default_attention",
     ),
 )
 @pytest.mark.parametrize(
@@ -66,11 +76,11 @@ from models.tt_transformers.tt.model_config import HfModelWrapper
 @pytest.mark.parametrize(
     "optimizations",
     [
-        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
     ids=[
-        # "performance",
+        "performance",
         "accuracy"
     ],
 )
@@ -94,95 +104,57 @@ def test_model_inference(
     mesh_device,
     use_program_cache,
     reset_seeds,
-    # ensure_gc,
     request,
+    parse_chat = False
 ):
-    ref_past_key_value = DynamicCache()
     run_ref_pt = True  # Flag to run reference PyTorch model and compare PCC
-    cache_pcc = layers == 1  # Flag to measure KV cache PCC. Avoid running for all layers to speed up test time.
     dtype = ttnn.bfloat8_b
 
     test_id = request.node.callspec.id
     
     mode_accuracy = "accuracy" in test_id
     instruct = True if weights == "instruct" else False
-    dummy_weights = True if weights == "random" else False
 
     model_args = Phi3MiniModelArgs(
         mesh_device,
         instruct=instruct,
-        dummy_weights=dummy_weights,
         optimizations=optimizations,
         max_seq_len=max_seq_len,
         max_batch_size=batch_size,
     )
 
-    # Define minimum PCC for each iteration
-    if layers == 1:
-        pcc = 0.88 if mode_accuracy else 0.86
-    else:
-        pcc = 0.94 if mode_accuracy else 0.86
+    # Expected PCC for the model
+    pcc = 0.94 if mode_accuracy else 0.86
 
-    if layers == 1:  # quick mode has tight PCC checks for known models
+    # Number of decode iterations to run for the model
+    iterations = 15
 
-        iterations = 10
-    else:
-        iterations = 15
-    #######################333
-    final_model_pcc=0.9
-    ##########################
     if layers is not None:
         model_args.n_layers = layers
     state_dict = model_args.load_state_dict()
     state_dict_prefix = model_args.get_state_dict_prefix("", None)
 
+    prompts = ["Capital of india"] * model_args.max_batch_size
 
-
-    # prompts = ["This is a test"] * model_args.max_batch_size
-    # prompts = ["Capital of india"] * model_args.max_batch_size
-    # prompts = ["National sport of india"] * model_args.max_batch_size
-    prompts = ["GOAT of F1"] * model_args.max_batch_size
-
-    if dummy_weights:
-        encoded_prompts = [
-            [128000, 2028, 374, 264, 1296]
-        ] * model_args.max_batch_size  # "This is a test" encoded prompt
-        assert not instruct, "Instruct prompt not implemented with dummy weights"
+    
+    tokenizer = model_args.tokenizer
+    if instruct:
+        encoded_prompts = encode_prompt_hf(tokenizer=tokenizer, prompt_text=prompts[0])
     else:
-        tokenizer = model_args.tokenizer
-        if instruct:
-            encoded_prompts = encode_prompt_hf(tokenizer=tokenizer, prompt_text=prompts[0])
-        else:
-            encoded_prompts = [model_args.encode_prompt(prompt, instruct=False) for prompt in prompts]
+        encoded_prompts = [model_args.encode_prompt(prompt, instruct=False) for prompt in prompts]
 
     if run_ref_pt:
-        LAYER_INDEX = 0
-        LAYER_INDEX_SPLIT=32
-
         reference_transformer_model = model_args.reference_transformer(wrap=False)
         reference_model = HfModelWrapper(reference_transformer_model, model_args.head_dim)
         logger.info("Finished loading reference model.")
 
         # Embedding on host
         embd = model_args.reference_embedding(reference_transformer_model)
-        # embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
     else:
         # Embedding on host
         embd = model_args.reference_embedding()
 
-    embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
-
-
-    #     base_model = model_args.reference_ign_model
-    #     # reference_model = base_model.model[1:]
-    #     # torch_model_embedded = base_model.model.embed_tokens
-    #     torch_model_decode = base_model.model.layers[:LAYER_INDEX_SPLIT]
-    #     torch_model_norm = base_model.model.norm
-    #     torch_model_lm_head = base_model.lm_head
-    #     # reference_model = model_args.reference_transformer()
-    #     # reference_model.load_state_dict(reference_state_dict)
-
-    
+    embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})    
 
     generation_start_pos = 0
     generation_length = iterations
@@ -228,8 +200,6 @@ def test_model_inference(
 
     if run_ref_pt:
         all_tests_pass = True
-        final_tests_pass = True
-        kv_cache_tests_pass = True
         
 
     seqlen = 1  # Generating one token per user at a time
@@ -293,27 +263,7 @@ def test_model_inference(
 
         if run_ref_pt:  # Run reference model
             # In this test all users have the same position
-            if 0:
-                positions = torch.LongTensor([[current_pos]] * batch)
-                torch_output_states=pt_decode_input
-
-                for layer in range(LAYER_INDEX_SPLIT):
-                    torch_output_states = torch_model_decode[layer](torch_output_states, 
-                                                position_ids=positions, 
-                                                # position_ids=current_pos[0], 
-                                                past_key_value=ref_past_key_value,
-                                            #  past_key_value=ref_past_key_value[i],
-                                                use_cache=True)
-                    torch_output_states=torch_output_states[0]
-
-                torch_output_states = torch_model_norm(torch_output_states)#,
-                ref_output = torch_model_lm_head(torch_output_states)#,
-            else:
-                # pt_prefill_input = embd(encoded_prompt_tensor).view(batch_size, seq_len, -1)
-                ref_output = reference_model(pt_decode_input, current_pos[0])
-                #   ref_output = base_model(inputs_embeds=pt_decode_input)
-                #   ref_output=ref_output[0]
-        ######################################################
+            ref_output = reference_model(pt_decode_input, current_pos[0])
 
         # Increment position
         current_pos = torch.tensor([generation_start_pos + i + 1 for _ in range(batch)])
@@ -357,12 +307,7 @@ def test_model_inference(
 
         # Measure PCC if also running reference model
         if run_ref_pt:
-            if layers == 1 and i == iterations - 1:  # On last iteration in the quick test, set a tighter PCC
-                passing, pcc_message = comp_pcc(ref_output, tt_output_torch, final_model_pcc)
-                if not passing:
-                    final_tests_pass = False
-            else:
-                passing, pcc_message = comp_pcc(ref_output, tt_output_torch, pcc)
+            passing, pcc_message = comp_pcc(ref_output, tt_output_torch, pcc)
 
             logger.info(comp_allclose(ref_output, tt_output_torch))
             logger.info(f"PCC: {pcc_message}")
@@ -374,91 +319,14 @@ def test_model_inference(
             if not passing:
                 all_tests_pass = False
 
-            # Compare KV caches
-            if cache_pcc:
-                for l in range(model_args.n_layers):
-                    pytorch_layer_present = [
-                        reference_model.layers[l]
-                        .attention.cache_k.clone()
-                        .permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
-                        reference_model.layers[l]
-                        .attention.cache_v.clone()
-                        .permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
-                    ]
-                    tt_layer_present = []
-                    if paged_attention:
-                        for layer_past in tt_model.layers[l].attention.layer_past:
-                            tt_layer_present.append(
-                                ttnn.to_torch(
-                                    layer_past,
-                                    mesh_composer=ttnn.ConcatMesh2dToTensor(
-                                        mesh_device,
-                                        dims=(1, 3) if model_args.is_galaxy else (0, 1),
-                                        mesh_shape=model_args.cluster_shape,
-                                    ),
-                                )[reverse_permutation][:, : model_args.n_kv_heads, :, : model_args.head_dim]
-                                .reshape(
-                                    model_args.max_batch_size,
-                                    paged_attention_config.max_num_blocks // model_args.max_batch_size,
-                                    model_args.n_kv_heads,
-                                    paged_attention_config.block_size,
-                                    model_args.head_dim,
-                                )
-                                .transpose(1, 2)
-                                .reshape(model_args.max_batch_size, model_args.n_kv_heads, -1, model_args.head_dim)[
-                                    :batch, ...
-                                ]
-                            )
-                    else:
-                        for layer_past in tt_model.layers[l].attention.layer_past:
-                            tt_layer_present.append(
-                                ttnn.to_torch(
-                                    layer_past,
-                                    mesh_composer=ttnn.ConcatMesh2dToTensor(
-                                        mesh_device,
-                                        dims=(1, 0) if model_args.is_galaxy else (0, 1),
-                                        mesh_shape=model_args.cluster_shape,
-                                    ),
-                                )[:batch, :, :, :]
-                            )
-
-                    for kv_cache, (cache_pt, cache_tt) in enumerate(zip(pytorch_layer_present, tt_layer_present)):
-                        cache_length_to_check = min(
-                            model_args.max_seq_len, generation_start_pos + generation_length + 1
-                        )
-                        cache_pt = cache_pt[:, :, generation_start_pos:cache_length_to_check, :]
-                        cache_tt = cache_tt[:, :, generation_start_pos:cache_length_to_check, :]
-                        if (
-                            layers == 1 and i == iterations - 1
-                        ):  # On last iteration in the quick test, set a tighter PCC
-                            if kv_cache == 0:  # K cache
-                                does_pass, output_pcc = comp_pcc(cache_pt, cache_tt, final_k_cache_pcc)
-                            else:  # V cache
-                                does_pass, output_pcc = comp_pcc(cache_pt, cache_tt, final_v_cache_pcc)
-                        else:
-                            does_pass, output_pcc = comp_pcc(cache_pt, cache_tt, pcc)
-                        if kv_cache == 0:
-                            logger.info(f"K cache output: {output_pcc}")
-                        else:
-                            logger.info(f"V cache output: {output_pcc}")
-
-                        if does_pass:
-                            logger.info(f"KV Cache Passed!")
-                        else:
-                            logger.warning(f"KV Cache Failed! PCC value is lower than {pcc}")
-                            all_tests_pass = False
-
-        if not dummy_weights:
-            logger.info("[ttnn generation User 0] " + tokenizer.decode(all_outputs).replace("\n", "\\n"))
-            if run_ref_pt:
-                logger.info("[Ref generation User 0] " + tokenizer.decode(all_outputs_ref).replace("\n", "\\n"))
+        
+        if parse_chat:
+            conversation = parse_chat_output(tokenizer.decode(all_outputs).replace("\n", "\\n"))
+            display_chat(logger, conversation)
 
     if run_ref_pt:
         if all_tests_pass:
             logger.info(f"All {generation_length} decode iterations Passed!")
         else:
             logger.warning("One or more iterations of decode had bad PCC")
-            if layers == 1:
-                assert final_tests_pass, f"PCC value is lower than {final_model_pcc} for final output. Check Warnings!"
-            assert kv_cache_tests_pass, f"KV Cache PCC value is lower expected for some of the outputs. Check Warnings!"
             assert all_tests_pass, f"PCC value is lower than {pcc} for some of the outputs. Check Warnings!"
