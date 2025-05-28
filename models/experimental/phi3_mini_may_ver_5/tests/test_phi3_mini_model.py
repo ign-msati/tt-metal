@@ -7,25 +7,23 @@ from loguru import logger
 import os
 import ttnn
 from models.tt_transformers.tt.common import (
+    encode_prompt_hf,
     sample_host,
     PagedAttentionConfig,
 )
-# from models.tt_transformers.tt.model_config import ModelArgs, DecodersPrecision
-# from models.tt_transformers.tt.model_config import ModelArgs, DecodersPrecision
 from models.tt_transformers.tt.model_config import  DecodersPrecision
-from models.tt_transformers.tt.model_config import ModelArgs
 from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
-# from models.experimental.phi3_mini_may_ver_5.tt.model_config import ModelArgs
-# from models.tt_transformers.tt.model import Transformer
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Phi3Transformer
 from models.utility_functions import (
     comp_pcc,
     comp_allclose,
 )
-from transformers import AutoModelForCausalLM, StaticCache, DynamicCache
+from transformers import DynamicCache
 from models.utility_functions import skip_for_grayskull, skip_for_blackhole
-from transformers import AutoModelForCausalLM, DynamicCache
-from time import time
+from transformers import DynamicCache
+from models.tt_transformers.tt.model_config import HfModelWrapper
+
+
 @torch.no_grad()
 @skip_for_grayskull("Requires wormhole_b0 to run")
 @skip_for_blackhole("Failing on DRAM harvested P100a, see #21419")
@@ -60,27 +58,21 @@ from time import time
 @pytest.mark.parametrize(
     "batch_size",
     (1,),
-    # (32,),
 )
 @pytest.mark.parametrize(
     "max_seq_len",
-    # (256,),  # For decode-only unit test, there's no need to run with large sequence lengths
-    # (256,),  # For decode-only unit test, there's no need to run with large sequence lengths
-    # (1024*32,),  # For decode-only unit test, there's no need to run with large sequence lengths
-    # (1024*64,),  # For decode-only unit test, there's no need to run with large sequence lengths
-    # ((1024*128) + 200,),  # For decode-only unit test, there's no need to run with large sequence lengths
-    (1024*64,),  # For decode-only unit test, there's no need to run with large sequence lengths
+    (256,),
 )
 @pytest.mark.parametrize(
     "optimizations",
     [
-        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
-        # lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
+        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
     ids=[
-        "performance",
-        #   "accuracy"
-          ],
+        # "performance",
+        "accuracy"
+    ],
 )
 @pytest.mark.parametrize(
     "mesh_device",
@@ -111,14 +103,14 @@ def test_model_inference(
     dtype = ttnn.bfloat8_b
 
     test_id = request.node.callspec.id
+    
     mode_accuracy = "accuracy" in test_id
-    # instruct = False  # True if weights == "instruct" else False
-    instruct=True
+    instruct = True if weights == "instruct" else False
     dummy_weights = True if weights == "random" else False
-    dummy_weights=False
+
     model_args = Phi3MiniModelArgs(
         mesh_device,
-        # instruct=instruct,
+        instruct=instruct,
         dummy_weights=dummy_weights,
         optimizations=optimizations,
         max_seq_len=max_seq_len,
@@ -145,9 +137,12 @@ def test_model_inference(
     state_dict_prefix = model_args.get_state_dict_prefix("", None)
 
 
+
     # prompts = ["This is a test"] * model_args.max_batch_size
-    prompts = ["Capital of india"] * model_args.max_batch_size
-    # if dummy_weights:
+    # prompts = ["Capital of india"] * model_args.max_batch_size
+    # prompts = ["National sport of india"] * model_args.max_batch_size
+    prompts = ["GOAT of F1"] * model_args.max_batch_size
+
     if dummy_weights:
         encoded_prompts = [
             [128000, 2028, 374, 264, 1296]
@@ -156,11 +151,7 @@ def test_model_inference(
     else:
         tokenizer = model_args.tokenizer
         if instruct:
-            chat = [{'role': 'user', 'content': prompts[0]}]
-            print(f"{chat=}")
-            tpl = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")
-            # encoded_prompts = tpl['input_ids'] # [model_args.encode_prompt(prompt) for prompt in prompts]
-            encoded_prompts = tpl['input_ids'] # [model_args.encode_prompt(prompt) for prompt in prompts]
+            encoded_prompts = encode_prompt_hf(tokenizer=tokenizer, prompt_text=prompts[0])
         else:
             encoded_prompts = [model_args.encode_prompt(prompt, instruct=False) for prompt in prompts]
 
@@ -168,20 +159,30 @@ def test_model_inference(
         LAYER_INDEX = 0
         LAYER_INDEX_SPLIT=32
 
-        # base_model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
-        # reference_model = model_args.reference_transformer()
-        base_model = model_args.reference_ign_model
-        # reference_model = base_model.model[1:]
-        # torch_model_embedded = base_model.model.embed_tokens
-        torch_model_decode = base_model.model.layers[:LAYER_INDEX_SPLIT]
-        torch_model_norm = base_model.model.norm
-        torch_model_lm_head = base_model.lm_head
-        # reference_model = model_args.reference_transformer()
-        # reference_model.load_state_dict(reference_state_dict)
+        reference_transformer_model = model_args.reference_transformer(wrap=False)
+        reference_model = HfModelWrapper(reference_transformer_model, model_args.head_dim)
+        logger.info("Finished loading reference model.")
 
-    # Embedding on host
-    embd = model_args.reference_embedding()
+        # Embedding on host
+        embd = model_args.reference_embedding(reference_transformer_model)
+        # embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
+    else:
+        # Embedding on host
+        embd = model_args.reference_embedding()
+
     embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
+
+
+    #     base_model = model_args.reference_ign_model
+    #     # reference_model = base_model.model[1:]
+    #     # torch_model_embedded = base_model.model.embed_tokens
+    #     torch_model_decode = base_model.model.layers[:LAYER_INDEX_SPLIT]
+    #     torch_model_norm = base_model.model.norm
+    #     torch_model_lm_head = base_model.lm_head
+    #     # reference_model = model_args.reference_transformer()
+    #     # reference_model.load_state_dict(reference_state_dict)
+
+    
 
     generation_start_pos = 0
     generation_length = iterations
@@ -229,14 +230,16 @@ def test_model_inference(
         all_tests_pass = True
         final_tests_pass = True
         kv_cache_tests_pass = True
+        
 
     seqlen = 1  # Generating one token per user at a time
     batch = model_args.max_batch_size
 
     # Select the first token from the prompts for initial decoding
-    encoded_prompts_tensor = torch.tensor(encoded_prompts)  # [:,0]
+    encoded_prompts_tensor = torch.tensor(encoded_prompts).unsqueeze(0)  # [:,0]
     pt_decode_input = embd(encoded_prompts_tensor[:, 0]).view(batch, seqlen, -1)
     tt_decode_input = pt_decode_input
+
 
     # Keep track of generated outputs to print out later
     all_outputs = []
@@ -266,6 +269,7 @@ def test_model_inference(
 
         # Get cos/sin matrices for the current position of each user
         rot_mats = tt_model.rope_setup.get_rot_mats(current_pos)
+
         # Run TT model
         tt_out = tt_model(
             decode_input,
@@ -274,8 +278,6 @@ def test_model_inference(
             mode="decode",
             page_table=page_table_tt,
         )
-
-
 
         # Convert ttnn tensor to torch tensor
         mesh_composer = ttnn.ConcatMesh2dToTensor(
@@ -291,15 +293,11 @@ def test_model_inference(
 
         if run_ref_pt:  # Run reference model
             # In this test all users have the same position
-            if 1:
-            # ref_output = reference_model(pt_decode_input, current_pos[0])
+            if 0:
                 positions = torch.LongTensor([[current_pos]] * batch)
                 torch_output_states=pt_decode_input
-                # print(f"{positions.shape=}")
-                # print(f"{torch_output_states.shape=}")
+
                 for layer in range(LAYER_INDEX_SPLIT):
-                    # print("layer done********************", layer)
-                    #############################################33
                     torch_output_states = torch_model_decode[layer](torch_output_states, 
                                                 position_ids=positions, 
                                                 # position_ids=current_pos[0], 
@@ -311,8 +309,10 @@ def test_model_inference(
                 torch_output_states = torch_model_norm(torch_output_states)#,
                 ref_output = torch_model_lm_head(torch_output_states)#,
             else:
-                  ref_output = base_model(inputs_embeds=pt_decode_input)
-                  ref_output=ref_output[0]
+                # pt_prefill_input = embd(encoded_prompt_tensor).view(batch_size, seq_len, -1)
+                ref_output = reference_model(pt_decode_input, current_pos[0])
+                #   ref_output = base_model(inputs_embeds=pt_decode_input)
+                #   ref_output=ref_output[0]
         ######################################################
 
         # Increment position
@@ -329,11 +329,11 @@ def test_model_inference(
         )
 
         # Append the generated token to the list of outputs /prefill
-        if i in range(len(encoded_prompts[0])):
+        if i in range(len(encoded_prompts)):
             # While in "prefill" mode, use the prompt tokens as the output
-            all_outputs.append(encoded_prompts[0][i])  # Update list of TT outputs
+            all_outputs.append(encoded_prompts[i])  # Update list of TT outputs
             if run_ref_pt:
-                all_outputs_ref.append(encoded_prompts[0][i])  # Update list of ref outputs
+                all_outputs_ref.append(encoded_prompts[i])  # Update list of ref outputs
 
             tt_decode_input = embd(encoded_prompts_tensor[:, i]).view(batch, seqlen, -1)
             if run_ref_pt:
