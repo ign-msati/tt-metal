@@ -164,13 +164,11 @@ def test_model_inference(
     # Load reference model
     if run_ref_pt:
         logger.info("Loading reference model...")
-        state_dict_prefix = model_args.get_state_dict_prefix("", None)
         reference_transformer_model = model_args.reference_transformer(wrap=False)
         reference_model = HfModelWrapper(reference_transformer_model, model_args.head_dim)
 
         # Embedding on host
         embd = model_args.reference_embedding(reference_transformer_model)
-        embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
         logger.info("Finished loading reference model.")
 
     # Select the first token from the prompt for initial decoding
