@@ -67,16 +67,16 @@ The expected performance results can be found in `PERF.md`
 
 ## Implementation details over TT-Transformer
 
-- The presented implementation of RoPE uses a dynamic scaling factor based on sequence length
-- If sequence length is greater than 4096, we'll use `long` scaling factor, otherwise we use `short` scaling factor 
+- The presented implementation of RoPE uses a dynamic scaling factor.
+- It switches the scaling when sequence length > 4k to support till 128k.
 
 ## Known Issues
 
-1. For long context (64k token) demo inputs, we observed a DRAM overflow on both N150 & N300
-2. For 32k context length, we observe the same DRAM overflow only on N150
+1. N300 devices may hit DRAM limit with 64k context length.
+2. N150 devices may hit DRAM limit with 32k context length.
 
 
-**Max Prefill Chunk Sizes (text-only):**
+### Max Prefill Chunk Sizes (text-only)
 |         Model Name        |      N150     |      N300     |
 |---------------------------|---------------|---------------|
 | Phi-3-mini-128k-instruct  |   1k tokens   |  128k tokens  |

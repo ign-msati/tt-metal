@@ -6,7 +6,8 @@ import torch
 import ttnn
 from ttnn import ReplicateTensorToMesh
 from models.tt_transformers.tt.rope import RotarySetup
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import precompute_freqs, gather_cos_sin
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import precompute_freqs
+from models.tt_transformers.tt.common import gather_cos_sin
 
 
 def compute_gather_cos_sin(dhead, end, theta, scale_factor, ext_scale_tensor, position_ids):

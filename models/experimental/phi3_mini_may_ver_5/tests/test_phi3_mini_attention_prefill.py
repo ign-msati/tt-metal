@@ -13,7 +13,8 @@ from models.utility_functions import (
 )
 from models.utility_functions import skip_for_grayskull
 from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat, get_rot_transformation_mat, PagedAttentionConfig
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import get_prefill_rot_mat
+from models.tt_transformers.tt.common import get_rot_transformation_mat, PagedAttentionConfig
 
 
 @torch.no_grad()
@@ -58,7 +59,7 @@ def test_attention_inference(
     mesh_device,
     use_program_cache,
     reset_seeds,
-    # ensure_gc,
+    ensure_gc,
 ):
     dtype = ttnn.bfloat8_b
     pcc = 0.99

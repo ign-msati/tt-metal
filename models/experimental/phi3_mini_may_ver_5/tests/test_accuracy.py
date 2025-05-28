@@ -151,12 +151,10 @@ def test_tt_model_acc(
     logger.info("Finished loading weights...")
 
     # Load the reference data
-
     if use_reference_file:
         # Existing reference file loading logic
-        # reference_data_file = f"models/tt_transformers/tests/reference_outputs/{model_args.model_name}.refpt"
-        # reference_data_file = f"models/experimental/phi3_mini_may_ver_5/tests/reference_output/{model_args.model_name}.refpt"
-        reference_data_file = "models/experimental/phi3_mini_may_ver_5/tests/reference_output/Phi-3-mini-128k-instruct.refpt"
+        current_file_path = os.path.dirname(os.path.abspath(__file__))
+        reference_data_file = os.path.join(current_file_path, f"reference_output/{model_args.model_name}.refpt")
         logger.info(f"Loading reference data from {reference_data_file}")
         assert os.path.exists(reference_data_file)
         reference_data = torch.load(reference_data_file)

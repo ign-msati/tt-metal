@@ -7,7 +7,6 @@ from loguru import logger
 import os
 import ttnn
 from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import PagedAttentionConfig
 from models.tt_transformers.tt.decoder import TransformerBlock
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import Phi3MiniRotarySetup
 from models.utility_functions import (
@@ -15,6 +14,7 @@ from models.utility_functions import (
     comp_allclose,
 )
 from models.utility_functions import skip_for_grayskull
+from models.tt_transformers.tt.common import PagedAttentionConfig
 
 
 @torch.no_grad()
@@ -59,7 +59,7 @@ def test_decoder_inference(
     mesh_device,
     use_program_cache,
     reset_seeds,
-    # ensure_gc,
+    ensure_gc,
 ):
     dtype = ttnn.bfloat8_b
 
@@ -141,7 +141,6 @@ def test_decoder_inference(
             mesh_shape=model_args.cluster_shape,
         ),
     )
-
     for i in range(generation_length):
         logger.info(f"[Decoder] Generating token {i}")
 

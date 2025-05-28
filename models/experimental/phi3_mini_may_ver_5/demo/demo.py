@@ -9,13 +9,15 @@ import pytest
 import os
 import ttnn
 
-from models.tt_transformers.tt.generator import Generator, SamplingParams
+from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_generator import Phi3MiniGenerator
+from models.tt_transformers.tt.generator import SamplingParams
 from models.tt_transformers.tt.model_config import DecodersPrecision, parse_decoder_json
 
 from models.tt_transformers.tt.common import (
     PagedAttentionConfig,
     sample_host,
 )
+
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import (
     create_tt_model,
     preprocess_inputs_prefill,
@@ -23,7 +25,7 @@ from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import (
 
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.demos.utils.llm_demo_utils import create_benchmark_data
-from models.tt_transformers.demo.simple_text_demo import load_inputs, create_tt_page_table
+from models.tt_transformers.demo.simple_text_demo import load_inputs,create_tt_page_table
 
 
 def prepare_generator_args(
@@ -150,7 +152,7 @@ def prepare_generator_args(
             1,  # repeat_batches
             16 * 1024,  # max_seq_len
             1,  # batch_size
-            1500,  # max_generated_tokens
+            15000,  # max_generated_tokens
             True,  # paged_attention
             {
                 "page_block_size": 32,
@@ -166,7 +168,7 @@ def prepare_generator_args(
             True,  # instruct mode
             1,  # repeat_batches
             8192,  # max_seq_len
-            32,  # batch_size
+            1,  # batch_size
             4096,  # max_generated_tokens
             True,  # paged_attention
             {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
@@ -333,7 +335,7 @@ def test_demo_text(
         page_params=page_params,
         paged_attention=paged_attention,
     )
-    generator = Generator(model, model_args, mesh_device, tokenizer=tokenizer)
+    generator = Phi3MiniGenerator(model, model_args, mesh_device, tokenizer=tokenizer)
 
     num_tokens_generated_decode = []
 

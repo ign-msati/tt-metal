@@ -1,9 +1,11 @@
 import torch
 import ttnn
-from models.tt_transformers.tt.common import gather_cos_sin, get_rot_transformation_mat, PagedAttentionConfig
+from models.tt_transformers.tt.common import gather_cos_sin, PagedAttentionConfig
 from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from loguru import logger
 import math
+
+
 def precompute_freqs(dim: int, end: int, theta: float = 10000.0, scale_factor: int=1.0, ext_scale_tensor: torch.tensor=torch.tensor([1.0])):
     """
     Precompute the frequency tensor for sine and cosine values with given dimensions, grok-style.
@@ -147,6 +149,39 @@ def preprocess_inputs_prefill(
         decoding_pos,
         prefill_lens,
     )
+
+
+def get_max_prefill_chunk_size(seq_len, max_prefill_seq_len, min_chunk_size=None):
+    """
+    Determine the largest multiple of min_chunk_size or default : 2048 that divides `seq_len` and is less than or equal to `max_prefill_seq_len`.
+
+    **Assumptions**:
+    - `seq_len` is a multiple of min_chunk_size or default:2048.
+    - `max_prefill_seq_len` is a multiple of min_chunk_size or default:2048.
+    """
+    MIN_CHUNK_SIZE = 2048 if min_chunk_size is None else min_chunk_size
+
+    if not isinstance(seq_len, int) or not isinstance(max_prefill_seq_len, int):
+        raise TypeError("Both seq_len and max_prefill_seq_len must be integers.")
+    if seq_len <= 0 or max_prefill_seq_len <= 0:
+        raise ValueError("Both seq_len and max_prefill_seq_len must be positive integers.")
+
+    if seq_len % MIN_CHUNK_SIZE != 0:
+        raise ValueError(f"seq_len ({seq_len}) must be a multiple of {MIN_CHUNK_SIZE}.")
+    if max_prefill_seq_len % MIN_CHUNK_SIZE != 0:
+        raise ValueError(f"max_prefill_seq_len ({max_prefill_seq_len}) must be a multiple of {MIN_CHUNK_SIZE}.")
+
+    # Calculate the maximum possible chunk size
+    # It cannot exceed either max_prefill_seq_len or seq_len
+    max_possible_chunk = min(max_prefill_seq_len, seq_len)
+
+    # Iterate from the largest possible multiple of MIN_CHUNK_SIZE down to MIN_CHUNK_SIZE
+    for chunk_size in range(max_possible_chunk, 0, -MIN_CHUNK_SIZE):
+        if seq_len % chunk_size == 0:
+            return chunk_size
+
+    raise ValueError("No valid chunk size found")
+
 
 def create_tt_model(
     mesh_device,
