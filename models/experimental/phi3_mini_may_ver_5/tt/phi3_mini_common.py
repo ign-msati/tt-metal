@@ -1,7 +1,6 @@
 import torch
 import ttnn
 from models.tt_transformers.tt.common import gather_cos_sin, get_rot_transformation_mat, PagedAttentionConfig
-# from models.tt_transformers.tt.model_config import ModelArgs
 from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from loguru import logger
 import math

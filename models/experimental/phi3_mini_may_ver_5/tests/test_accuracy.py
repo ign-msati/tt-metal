@@ -15,7 +15,6 @@ from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_model import Phi3Trans
 from models.tt_transformers.tt.model_config import  DecodersPrecision, parse_decoder_json
 from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 from pathlib import Path
-# from models.tt_transformers.tests.test_accuracy import get_accuracy_thresholds
 
 
 def get_accuracy_thresholds(model_args, optimizations):
@@ -67,9 +66,7 @@ def get_accuracy_thresholds(model_args, optimizations):
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize(
     "prefill_len, decode_len, max_seq_len",  # Max seqlen should be at least prefill_len + decode_len
-    # ((512, 128, 1024),),
-    ((512, 511, 1024),),
-    # ((24, 24, 1024),),
+    ((512, 128, 1024),),
     #    ((131072-8192, 8192-1, 131072),),
 )
 @pytest.mark.parametrize(
@@ -84,13 +81,10 @@ def get_accuracy_thresholds(model_args, optimizations):
 @pytest.mark.parametrize(
     "optimizations",
     [
-        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
-    ids=[
-        # "performance", 
-        "accuracy"
-        ],
+    ids=["performance", "accuracy"],
 )
 @pytest.mark.parametrize(
     "paged_attention",
@@ -115,7 +109,7 @@ def get_accuracy_thresholds(model_args, optimizations):
     "use_reference_file",
     [
         pytest.param(True, id="reference_file"),
-        # pytest.param(False, id="reference_text"),
+        pytest.param(False, id="reference_text"),
     ],
 )
 def test_tt_model_acc(

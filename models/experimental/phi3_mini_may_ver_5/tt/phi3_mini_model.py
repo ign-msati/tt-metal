@@ -14,13 +14,10 @@ from models.tt_transformers.tt.lm_head import LMHead
 from models.tt_transformers.tt.common import copy_host_to_device
 from models.tt_transformers.tt.embedding import Embedding
 from models.tt_transformers.tt.model_config import TensorGroup
-# from models.tt_transformers.tt.rope import RotarySetup
-# from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import RotarySetup
 from models.tt_transformers.tt.model import Transformer
 
 
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_rope import Phi3MiniRotarySetup
-# from models.experimental.phi3_mini_may_ver_5.tt.model_config import Phi3MiniModelArgs
 
 class Phi3Transformer(Transformer):
     def __init__(self, args, dtype, mesh_device, state_dict, weight_cache_path, paged_attention_config=None, use_paged_kv_cache=False):
@@ -34,16 +31,6 @@ class Phi3Transformer(Transformer):
             use_paged_kv_cache=use_paged_kv_cache
         )
 
-        # self.rope_setup = RotarySetup(
-        #     mesh_device,
-        #     args.max_batch_size,
-        #     args.head_dim,
-        #     args.max_seq_len,
-        #     args.rope_theta,
-        #     args.rope_ext_scaling,
-        #     # args.rope_scaling_factor,
-        #     args.orig_context_len,
-        # )
         self.rope_setup = Phi3MiniRotarySetup(
         device=mesh_device,
         batch_size=args.max_batch_size,
@@ -85,16 +72,6 @@ class Phi3Transformer(Transformer):
                 self.rope_setup.cos_matrix["short_scaled"][:, :, start_pos : start_pos + S, :],
                 self.rope_setup.sin_matrix["short_scaled"][:, :, start_pos : start_pos + S, :],
             ]
-        # if S > self.rope_setup.orig_context_len:
-        #     tt_rot_mats_prefill = [
-        #         self.rope_setup.cos_long_matrix[:, :, start_pos : start_pos + S, :],
-        #         self.rope_setup.sin_long_matrix[:, :, start_pos : start_pos + S, :],
-        #     ]
-        # else:
-        #     tt_rot_mats_prefill = [
-        #         self.rope_setup.cos_long_matrix[:, :, start_pos : start_pos + S, :],
-        #         self.rope_setup.sin_long_matrix[:, :, start_pos : start_pos + S, :],
-        #     ]
 
         if page_table is not None:
             tt_page_table = ttnn.from_torch(
