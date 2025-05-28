@@ -101,32 +101,13 @@ This configuration uses bfp4 MLP FF1+FF3 for all models. **Batch_size=1 and pref
 | Qwen2.5-7B     | N300   |               |           |
 | Qwen2.5-72B    | T3K    |               |           |
 
-##  Long-context (64K Tokens)
+##  Long-context (32K Tokens)
 
 This configuration uses bfp4 MLP FF1+FF3 for all models. **Batch_size=1 and prefill_length is 32k tokens.**
 
 | Model                     | Device | Speed (t/s/u) | TTFT (ms) |
 |----------------           |--------|---------------|-----------|
-| Llama3.2-1B               | N150   | 53.0          | 20066     |
-| Llama3.2-1B               | N300   | 65.2          | 10949     |
-| Llama3.2-1B               | T3K    | 73.7          | 5271      |
-| Llama3.2-1B               | TG     |               |           |
-| Llama3.2-3B               | N150   | 25.3          | 46743     |
-| Llama3.2-3B               | N300   | 34.8          | 22921     |
-| Llama3.2-3B               | T3K    | 41.0          | 10677     |
-| Llama3.2-3B               | TG     |               |           |
-| Llama3.1-8B               | N150   | 16.9          | 64385     |
-| Llama3.1-8B               | N300   | 26.1          | 36229     |
-| Llama3.1-8B               | T3K    | 38.1          | 16165     |
-| Llama3.1-8B               | TG     |               |           |
-| Llama3.2-11B              | N300   | 26.1          | 36247     |
-| Llama3.2-11B              | T3K    | 38.4          | 16167     |
-| Llama3.2-11B              | TG     |               |           |
-| Llama3.1-70B              | T3K    | 11.9          | 74363     |
-| Llama3.1-70B              | TG     |               |           |
-| Qwen2.5-7B                | N300   |               |           |
-| Qwen2.5-72B               | T3K    |               |           |
-| Phi-3-mini-128k-instruct  | N300   | 37.02         |172.77     |    |
+| Phi-3-mini-128k-instruct  | N300   | 23.17         | 11335.01  |
 
 ## Short-Context, Batch-32
 
