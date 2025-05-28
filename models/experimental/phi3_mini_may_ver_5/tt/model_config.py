@@ -31,6 +31,61 @@ class Phi3MiniModelArgs(ModelArgs):
             max_seq_len=max_seq_len,
             optimizations=optimizations,
         )
+        # self.min_prefill_chunk_size=None
+        # if self.device_name=="N150":
+        #     self.min_prefill_chunk_size = 1024
+        # assert(self.max_prefill_chunk_size>=self.min_prefill_chunk_size) 
+        #############################################################3
+        # Set the max number of tokens for each prefill chunk based on the model and device
+        max_prefill_chunk_size_div1024 = os.getenv("MAX_PREFILL_CHUNK_SIZE")
+        if max_prefill_chunk_size_div1024 is None:
+            # TODO Improve this to be more general to more devices and models
+            MAX_PREFILL_CHUNK_SIZES_DIV1024 = {"N150": 1, "N300": 32}
+            try:
+                max_prefill_chunk_size_div1024 = MAX_PREFILL_CHUNK_SIZES_DIV1024[self.device_name]
+            except KeyError:
+                logger.warning(
+                    f"Model {self.model_name} on device {self.device_name}, setting MAX_PREFILL_CHUNK_SIZE to 4 for compatibility"
+                )
+                logger.warning(
+                    f"Try setting MAX_PREFILL_CHUNK_SIZE to larger powers of 2 up to e.g. 128 for faster performance (if you run out of L1 memory it was too high)"
+                )
+                max_prefill_chunk_size_div1024 = 4
+            assert (
+                max_prefill_chunk_size_div1024 is not None
+            ), f"Unsupported model {self.model_name} on device {self.device_name}"
+        else:
+            max_prefill_chunk_size_div1024 = int(max_prefill_chunk_size_div1024)
+        self.max_prefill_chunk_size = max_prefill_chunk_size_div1024 * 1024
+
+        ##################################################################
+        # Set the min number of tokens for each prefill chunk based on the model and device
+        min_prefill_chunk_size_div1024 = os.getenv("MIN_PREFILL_CHUNK_SIZE")
+        if min_prefill_chunk_size_div1024 is None:
+            # TODO Improve this to be more general to more devices and models
+            MIN_PREFILL_CHUNK_SIZES_DIV1024 = {"N150": 1, "N300": 2}
+            try:
+                min_prefill_chunk_size_div1024 = MIN_PREFILL_CHUNK_SIZES_DIV1024[self.device_name]
+            except KeyError:
+                logger.warning(
+                    f"Model {self.model_name} on device {self.device_name}, setting MIN_PREFILL_CHUNK_SIZE to 2 for compatibility"
+                )
+                # logger.warning(
+                #     f"Try setting Min_PREFILL_CHUNK_SIZE to larger powers of 2 up to e.g. 128 for faster performance (if you run out of L1 memory it was too high)"
+                # )
+                min_prefill_chunk_size_div1024 = 2
+            assert (
+                min_prefill_chunk_size_div1024 is not None
+            ), f"Unsupported model {self.model_name} on device {self.device_name}"
+        else:
+            min_prefill_chunk_size_div1024 = int(min_prefill_chunk_size_div1024)
+        self.min_prefill_chunk_size = min_prefill_chunk_size_div1024 * 1024
+
+        ##################################################################
+        assert (
+                self.min_prefill_chunk_size <= self.max_prefill_chunk_size
+            ), f"Min prefill chunk size {self.min_prefill_chunk_size} should not be greater than Max prefill chunk size {self.max_prefill_chunk_size}"
+
 
     def _set_params_from_dict(self, params):
         # Common params with different names between Meta and HF
