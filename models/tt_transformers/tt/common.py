@@ -437,16 +437,13 @@ def nearest_pow_2(x):
 
 def get_max_prefill_chunk_size(seq_len, max_prefill_seq_len, min_chunk_size=None):
     """
-    Determine the largest multiple of 2048 that divides `seq_len` and is less than or equal to `max_prefill_seq_len`.
+    Determine the largest multiple of min_chunk_size or default : 2048 that divides `seq_len` and is less than or equal to `max_prefill_seq_len`.
 
     **Assumptions**:
-    - `seq_len` is a multiple of 2048.
-    - `max_prefill_seq_len` is a multiple of 2048.
+    - `seq_len` is a multiple of min_chunk_size or default:2048.
+    - `max_prefill_seq_len` is a multiple of min_chunk_size or default:2048.
     """
-    # MIN_CHUNK_SIZE = 2048
     MIN_CHUNK_SIZE = 2048 if min_chunk_size is None else min_chunk_size
-    # MIN_CHUNK_SIZE = min_chunk_size
-
 
     if not isinstance(seq_len, int) or not isinstance(max_prefill_seq_len, int):
         raise TypeError("Both seq_len and max_prefill_seq_len must be integers.")
