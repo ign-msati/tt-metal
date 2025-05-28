@@ -66,7 +66,7 @@ def get_accuracy_thresholds(model_args, optimizations):
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize(
     "prefill_len, decode_len, max_seq_len",  # Max seqlen should be at least prefill_len + decode_len
-    ((512, 128, 1024),),
+    ((512, 511, 1024),),
     #    ((131072-8192, 8192-1, 131072),),
 )
 @pytest.mark.parametrize(
@@ -155,6 +155,7 @@ def test_tt_model_acc(
     if use_reference_file:
         # Existing reference file loading logic
         # reference_data_file = f"models/tt_transformers/tests/reference_outputs/{model_args.model_name}.refpt"
+        # reference_data_file = f"models/experimental/phi3_mini_may_ver_5/tests/reference_output/{model_args.model_name}.refpt"
         reference_data_file = "models/experimental/phi3_mini_may_ver_5/tests/reference_output/Phi-3-mini-128k-instruct.refpt"
         logger.info(f"Loading reference data from {reference_data_file}")
         assert os.path.exists(reference_data_file)
