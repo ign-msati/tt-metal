@@ -109,7 +109,7 @@ class Phi3MiniRotarySetup(RotarySetup):
             mesh_mapper=ReplicateTensorToMesh(device) if self.is_mesh_device else None,
         )
 
-    def get_rot_mats(self, position_idxs, return_rot_idxs=False):
+    def get_rot_mats(self, position_idxs, return_rot_idxs=False, force_long_context_scaling=False):
         device = self.device
 
         # If position_idxs is a torch tensor, get the TTNN version of it
@@ -125,9 +125,14 @@ class Phi3MiniRotarySetup(RotarySetup):
 
         embedding_layout = ttnn.TILE_LAYOUT
 
-        # Using rot_mats which can dynamically shift scaling when crossing the model's original context length
-        cos = ttnn.embedding(rot_idxs, self.cos_decode, layout=embedding_layout)  # [1, batch, head_dim]
-        sin = ttnn.embedding(rot_idxs, self.sin_decode, layout=embedding_layout)  # [1, batch, head_dim]
+        if force_long_context_scaling:
+            # Forcing the long context scaled rot_mats
+            cos = ttnn.embedding(rot_idxs, self.cos_matrix["long_scaled"], layout=embedding_layout)  # [1, batch, head_dim]
+            sin = ttnn.embedding(rot_idxs, self.sin_matrix["long_scaled"], layout=embedding_layout)  # [1, batch, head_dim]    
+        else:
+            # Using rot_mats which can dynamically shift scaling when crossing the model's original context length
+            cos = ttnn.embedding(rot_idxs, self.cos_decode, layout=embedding_layout)  # [1, batch, head_dim]
+            sin = ttnn.embedding(rot_idxs, self.sin_decode, layout=embedding_layout)  # [1, batch, head_dim]
 
         cos = ttnn.unsqueeze_to_4D(cos)  # [1, 1, batch, head_dim]
         sin = ttnn.unsqueeze_to_4D(sin)  # [1, 1, batch, head_dim]
