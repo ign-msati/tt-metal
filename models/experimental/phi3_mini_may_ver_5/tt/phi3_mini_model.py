@@ -64,8 +64,8 @@ class Phi3Transformer(Transformer):
             ]
         else:
             tt_rot_mats_prefill = [
-                self.rope_setup.cos_matrix["short_scaled"][:, :, start_pos : start_pos + S, :],
-                self.rope_setup.sin_matrix["short_scaled"][:, :, start_pos : start_pos + S, :],
+                self.rope_setup.cos_matrix["dynamic_scaled"][:, :, start_pos : start_pos + S, :],
+                self.rope_setup.sin_matrix["dynamic_scaled"][:, :, start_pos : start_pos + S, :],
             ]
 
         if page_table is not None:

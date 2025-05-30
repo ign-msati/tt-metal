@@ -42,12 +42,11 @@ class Phi3MiniRotarySetup(RotarySetup):
         # Generate the cos/sin matrices needed for ttnn.embedding op
         short_scaled_cos_matrix, short_scaled_sin_matrix = compute_gather_cos_sin(
             dhead=head_dim,
-            end=max_seq_len,
+            end=orig_context_len,
             theta=rope_theta,
             scale_factor=scale_factor,
             ext_scale_tensor=torch.tensor(ext_scale_tensors["short_factor"]),
-            # using max_seq_len in case padded_prefill > orig_context_len for model
-            position_ids=torch.arange(max_seq_len),
+            position_ids=torch.arange(orig_context_len),
         )
         long_scaled_cos_matrix, long_scaled_sin_matrix = compute_gather_cos_sin(
             dhead=head_dim,
@@ -58,19 +57,35 @@ class Phi3MiniRotarySetup(RotarySetup):
             position_ids=torch.arange(max_seq_len),
         )
 
+        # In decode mode, the scaling of sin and cos tensors will switch dynamically after crossing the orig_context_len of the model
+        dynamic_scaled_cos_matrix = torch.cat(
+            (
+                short_scaled_cos_matrix,
+                long_scaled_cos_matrix[..., self.orig_context_len :, :],
+            ),
+            dim=-2,
+        )
+        dynamic_scaled_sin_matrix = torch.cat(
+            (
+                short_scaled_sin_matrix,
+                long_scaled_sin_matrix[..., self.orig_context_len :, :],
+            ),
+            dim=-2,
+        )
+
         # In prefill mode, the scaling of sin and cos tensors will be based on the total length of input being prefilled
         # If prefill_seq_len < orig_context_len, it will use the short_factor scaling tensor from model.config
         # IF prefill_seq_len > orig_context_len, all positions embeddings will be scaled using the long_factor tensor from model.config
         self.cos_matrix, self.sin_matrix = {}, {}
-        self.cos_matrix["short_scaled"] = ttnn.from_torch(
-            short_scaled_cos_matrix,
+        self.cos_matrix["dynamic_scaled"] = ttnn.from_torch(
+            dynamic_scaled_cos_matrix,
             device=device,
             layout=ttnn.TILE_LAYOUT,
             dtype=datatype,
             mesh_mapper=ReplicateTensorToMesh(device) if self.is_mesh_device else None,
         )
-        self.sin_matrix["short_scaled"] = ttnn.from_torch(
-            short_scaled_sin_matrix,
+        self.sin_matrix["dynamic_scaled"] = ttnn.from_torch(
+            dynamic_scaled_sin_matrix,
             device=device,
             layout=ttnn.TILE_LAYOUT,
             dtype=datatype,
@@ -85,24 +100,6 @@ class Phi3MiniRotarySetup(RotarySetup):
         )
         self.sin_matrix["long_scaled"] = ttnn.from_torch(
             long_scaled_sin_matrix,
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=datatype,
-            mesh_mapper=ReplicateTensorToMesh(device) if self.is_mesh_device else None,
-        )
-
-        # In decode mode, the scaling of sin and cos tensors will switch dynamically after crossing the orig_context_len of the model
-        cos_decode = torch.cat((short_scaled_cos_matrix[...,:self.orig_context_len,:], long_scaled_cos_matrix[...,self.orig_context_len:,:]), dim=-2)
-        sin_decode = torch.cat((short_scaled_sin_matrix[...,:self.orig_context_len,:], long_scaled_sin_matrix[...,self.orig_context_len:,:]), dim=-2)
-        self.cos_decode = ttnn.from_torch(
-            cos_decode,
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=datatype,
-            mesh_mapper=ReplicateTensorToMesh(device) if self.is_mesh_device else None,
-        )
-        self.sin_decode = ttnn.from_torch(
-            sin_decode,
             device=device,
             layout=ttnn.TILE_LAYOUT,
             dtype=datatype,
@@ -131,8 +128,8 @@ class Phi3MiniRotarySetup(RotarySetup):
             sin = ttnn.embedding(rot_idxs, self.sin_matrix["long_scaled"], layout=embedding_layout)  # [1, batch, head_dim]    
         else:
             # Using rot_mats which can dynamically shift scaling when crossing the model's original context length
-            cos = ttnn.embedding(rot_idxs, self.cos_decode, layout=embedding_layout)  # [1, batch, head_dim]
-            sin = ttnn.embedding(rot_idxs, self.sin_decode, layout=embedding_layout)  # [1, batch, head_dim]
+            cos = ttnn.embedding(rot_idxs, self.cos_matrix["dynamic_scaled"], layout=embedding_layout)  # [1, batch, head_dim]
+            sin = ttnn.embedding(rot_idxs, self.sin_matrix["dynamic_scaled"], layout=embedding_layout)  # [1, batch, head_dim]
 
         cos = ttnn.unsqueeze_to_4D(cos)  # [1, 1, batch, head_dim]
         sin = ttnn.unsqueeze_to_4D(sin)  # [1, 1, batch, head_dim]
