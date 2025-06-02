@@ -9,8 +9,7 @@ import pytest
 import os
 import ttnn
 
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_generator import Phi3MiniGenerator
-from models.tt_transformers.tt.generator import SamplingParams
+from models.tt_transformers.tt.generator import Generator, SamplingParams
 from models.tt_transformers.tt.model_config import DecodersPrecision, parse_decoder_json
 
 from models.tt_transformers.tt.common import (
@@ -335,7 +334,7 @@ def test_demo_text(
         page_params=page_params,
         paged_attention=paged_attention,
     )
-    generator = Phi3MiniGenerator(model, model_args, mesh_device, tokenizer=tokenizer)
+    generator = Generator(model, model_args, mesh_device, tokenizer=tokenizer)
 
     num_tokens_generated_decode = []
 
@@ -381,7 +380,6 @@ def test_demo_text(
             page_table=page_table,
             kv_cache=tt_kv_cache,
             prompt_lens=decoding_pos,
-            max_generated_tokens=max_generated_tokens,
         )
         profiler.end(f"compile_prefill", iteration=batch_idx)
         logger.info("Finished prefill warmup")
@@ -393,7 +391,6 @@ def test_demo_text(
             page_table=page_table,
             kv_cache=tt_kv_cache,
             prompt_lens=decoding_pos,
-            max_generated_tokens=max_generated_tokens,
         )
         prefilled_token = torch.argmax(logits, dim=-1)
         profiler.end(f"inference_prefill", iteration=batch_idx)

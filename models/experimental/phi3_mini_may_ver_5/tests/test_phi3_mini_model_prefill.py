@@ -9,7 +9,7 @@ import os
 import ttnn
 from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_common import create_tt_model
 from models.tt_transformers.tt.model_config import DecodersPrecision
-from models.experimental.phi3_mini_may_ver_5.tt.phi3_mini_generator import Phi3MiniGenerator
+from models.tt_transformers.tt.generator import Generator
 from models.utility_functions import (
     comp_pcc,
 )
@@ -137,7 +137,7 @@ def test_model_inference(
         num_layers=num_layers,
     )
     tokenizer = model_args.tokenizer
-    generator = Phi3MiniGenerator([tt_model], [model_args], mesh_device, tokenizer=tokenizer)
+    generator = Generator([tt_model], [model_args], mesh_device, tokenizer=tokenizer)
     logger.info("Finished loading TT model.")
 
     # Create page table if paged attention is enabled
