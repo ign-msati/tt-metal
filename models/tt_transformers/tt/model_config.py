@@ -425,6 +425,8 @@ class ModelArgs:
         self.mesh_device = mesh_device
         self.arch_name = ttnn.get_arch_name()
         self.dram_grid_size = mesh_device.dram_grid_size() if mesh_device else None  # CoreCoord with (x, y)
+        self.fuse_qkv = False
+        self.fuse_mlp = False
 
         if self.num_devices == 0:
             self.device_name = "CPU"
@@ -1633,6 +1635,8 @@ class ModelArgs:
                 state_dict = load_hf_state_dict(self.CKPT_DIR)
 
         if self.checkpoint_type == CheckpointType.HuggingFace:
+            self.fuse_qkv = any(["qkv" in layer_name for layer_name in state_dict.keys()])
+            self.fuse_mlp = any(["gate_up" in layer_name for layer_name in state_dict.keys()])
             state_dict = standardize_hf_keys(state_dict)
             state_dict = convert_hf_to_meta(state_dict, self.head_dim)
 
@@ -2083,7 +2087,9 @@ class ModelArgs:
             layer = model.model.layers[0]
             # TODO: Generalize for other HF models
             model_name_env = os.getenv("HF_MODEL")
-            if model_name_env is not None and "mistral" in model_name_env.lower():
+            if model_name_env is not None and (
+                "mistral" in model_name_env.lower() or "phi-3" in model_name_env.lower()
+            ):
                 wrapper = HfDecoderWrapper(layer, self.head_dim, layer.self_attn.rotary_emb)
             else:
                 wrapper = HfDecoderWrapper(layer, self.head_dim, model.model.rotary_emb)
@@ -2207,8 +2213,8 @@ class HfAttentionWrapper:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-    def load_state_dict(self, state_dict):
-        return self.attention.load_state_dict(convert_meta_to_hf(state_dict, self.head_dim))
+    def load_state_dict(self, state_dict, fuse_qkv=False):
+        return self.attention.load_state_dict(convert_meta_to_hf(state_dict, self.head_dim, fuse_qkv))
 
     @property
     def cache_k(self):
@@ -2269,8 +2275,8 @@ class HfDecoderWrapper:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-    def load_state_dict(self, state_dict):
-        return self.decoder.load_state_dict(convert_meta_to_hf(state_dict, self.head_dim))
+    def load_state_dict(self, state_dict, fuse_qkv=False, fuse_mlp=False):
+        return self.decoder.load_state_dict(convert_meta_to_hf(state_dict, self.head_dim, fuse_qkv, fuse_mlp))
 
 
 class HfModelWrapper:
@@ -2299,8 +2305,8 @@ class HfModelWrapper:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-    def load_state_dict(self, state_dict):
-        return self.model.load_state_dict(convert_meta_to_hf(state_dict, self.head_dim))
+    def load_state_dict(self, state_dict, fuse_qkv=False, fuse_mlp=False):
+        return self.model.load_state_dict(convert_meta_to_hf(state_dict, self.head_dim, fuse_qkv, fuse_mlp))
 
     def eval(self):
         self.model.eval()

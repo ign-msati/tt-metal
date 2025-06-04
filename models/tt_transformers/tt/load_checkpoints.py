@@ -238,8 +238,60 @@ def convert_hf_qkv_to_meta_format(loaded_weights, head_dim):
     return converted_weights
 
 
-def convert_meta_to_hf(state_dict, head_dim):
+def fuse_mlp_meta(state_dict):
+    key_map = {"w_gate": "w1.weight", "w_up": "w3.weight", "w_gate_up_proj": "w1_w3.weight"}
+
+    wgate_list = sorted(list(filter(lambda x: key_map["w_gate"] in x, state_dict.keys())))
+    wproj_list = sorted(list(filter(lambda x: key_map["w_up"] in x, state_dict.keys())))
+
+    for wgate_key, wproj_key in zip(wgate_list, wproj_list):
+        wgate = state_dict[wgate_key]
+        wproj = state_dict[wproj_key]
+
+        prefix_gate = wgate_key[: -len(key_map["w_gate"])]
+
+        fused_gate_up_proj = torch.vstack((wgate, wproj))
+        state_dict[f"{prefix_gate}{key_map['w_gate_up_proj']}"] = fused_gate_up_proj
+
+        del state_dict[wgate_key], state_dict[wproj_key]
+
+    return state_dict
+
+
+def fuse_qkv_meta(state_dict):
+    key_map = {
+        "w_query": "wq.weight",
+        "w_key": "wk.weight",
+        "w_value": "wv.weight",
+        # fused qkv mapping
+        "w_fused": "wqkv.weight",
+    }
+
+    wq_list = sorted(list(filter(lambda x: key_map["w_query"] in x, state_dict.keys())))
+    wk_list = sorted(list(filter(lambda x: key_map["w_key"] in x, state_dict.keys())))
+    wv_list = sorted(list(filter(lambda x: key_map["w_value"] in x, state_dict.keys())))
+
+    for wq_key, wk_key, wv_key in zip(wq_list, wk_list, wv_list):
+        wq = state_dict[wq_key]
+        wk = state_dict[wk_key]
+        wv = state_dict[wv_key]
+
+        prefix = wq_key[: -len(key_map["w_query"])]
+
+        fused_qkv = torch.vstack((wq, wk, wv))
+        state_dict[f"{prefix}{key_map['w_fused']}"] = fused_qkv
+
+        del state_dict[wq_key], state_dict[wk_key], state_dict[wv_key]
+
+    return state_dict
+
+
+def convert_meta_to_hf(state_dict, head_dim, fuse_qkv=False, fuse_mlp=False):
     state_dict = convert_meta_qkv_to_hf_format(state_dict, head_dim)
+    if fuse_qkv:
+        state_dict = fuse_qkv_meta(state_dict)
+    if fuse_mlp:
+        state_dict = fuse_mlp_meta(state_dict)
     state_dict = map_meta_to_hf_keys(state_dict)
     return state_dict
 
@@ -262,11 +314,14 @@ def map_meta_to_hf_keys(loaded_weights):
         "attention.wq.bias": "self_attn.q_proj.bias",
         "attention.wk.bias": "self_attn.k_proj.bias",
         "attention.wv.bias": "self_attn.v_proj.bias",
+        "attention.wqkv.weight": "self_attn.qkv_proj.weight",
         # Feed forward module
         "feed_forward.w1.weight": "mlp.gate_proj.weight",
         "feed_forward.w3.weight": "mlp.up_proj.weight",
         "feed_forward.w2.weight": "mlp.down_proj.weight",
+        "feed_forward.w1_w3.weight": "mlp.gate_up_proj.weight",
         # Direct mappings for when we get just the final components
+        "w1_w3.weight": "gate_up_proj.weight",
         "w1.weight": "gate_proj.weight",
         "w2.weight": "down_proj.weight",
         "w3.weight": "up_proj.weight",
@@ -277,6 +332,8 @@ def map_meta_to_hf_keys(loaded_weights):
         "wq.bias": "q_proj.bias",
         "wk.bias": "k_proj.bias",
         "wv.bias": "v_proj.bias",
+        # fused qkv mapping
+        "wqkv.weight": "qkv_proj.weight",
         # Host embeddings
         "emb.weight": "weight",
     }

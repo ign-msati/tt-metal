@@ -208,7 +208,7 @@ def test_model_inference(
     reference_model = None
     if run_ref_pt:
         reference_model = model_args.reference_transformer()
-        reference_model.load_state_dict(reference_state_dict)
+        reference_model.load_state_dict(reference_state_dict, model_args.fuse_qkv, model_args.fuse_mlp)
 
     # Embedding on host
     embd = model_args.reference_embedding(reference_model)
