@@ -83,6 +83,7 @@ def test_attention_inference(
         model_args.rope_theta,
         model_args.rope_scaling_factor,
         model_args.orig_context_len,
+        ext_scaling_tensor=model_args.rope_ext_scaling_tensor,
     )
     transformation_mat_torch = get_rot_transformation_mat(model_args.head_dim)
 

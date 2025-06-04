@@ -570,6 +570,7 @@ class ModelArgs:
                 "Qwen2.5-7B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Qwen2.5-72B": {"N150": None, "N300": None, "T3K": 32, "TG": 128, "P150x4": 128},
                 "Phi-3.5-mini-instruct": {"N150": 128, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
+                "Phi-3-mini-128k-instruct": {"N150": 1, "N300": 32, "T3K": 128, "TG": 128, "P150x4": 128},
                 "QwQ-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
             }
             try:
@@ -1437,12 +1438,27 @@ class ModelArgs:
         # If use_scaled_rope is not present, assume setting rope_scaling means use scaled rope
         # If it is present and is set to false, do not use scaled rope
         # Setting self.rope_scaling_factor to None is our way of saying do not use scaled rope
-        rope_scaling_params = params.get("rope_scaling", None)
-        if rope_scaling_params:
-            self.rope_scaling_factor = rope_scaling_params.get("factor", None)
-            self.orig_context_len = rope_scaling_params.get("original_max_position_embeddings", None)
+        if "rope_scaling" in params and params.get("use_scaled_rope", True):
+            self.rope_scaling_factor = params.get("factor", None)
+            self.orig_context_len = params.get("original_max_position_embeddings", None)
+            self.rope_ext_scaling_tensor = None
+            if isinstance(params["rope_scaling"], dict) and self.base_model_name == "Phi-3-mini-128k-instruct":
+                # Phi3 specific scaling logic
+                if params["rope_scaling"].get("type", None) == "longrope":
+                    assert self.orig_context_len is not None
+                    if self.max_seq_len > self.orig_context_len:
+                        ext_factor = params["rope_scaling"].get("long_factor", None)
+                    else:
+                        ext_factor = params["rope_scaling"].get("short_factor", None)
+                    if ext_factor is not None:
+                        max_context_len = params.get("max_position_embeddings", None)
+                        assert max_context_len is not None
+                        self.rope_ext_scaling_tensor = torch.tensor(ext_factor, dtype=torch.float32)
+                        scale = max_context_len / self.orig_context_len
+                        self.rope_scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.orig_context_len))
         else:
             self.rope_scaling_factor = None
+            self.rope_ext_scaling_tensor = None
             self.orig_context_len = None
 
         # Vision params (Meta-specific)
