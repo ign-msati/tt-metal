@@ -100,19 +100,23 @@ class ModelOptimizations:
                 logger.info(
                     f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
                 )
-                inst = cls(
-                    {
-                        "TensorPrecision": {
-                            TensorGroup.WQKV: PrecisionSetting.BFP8,
-                            TensorGroup.KV_CACHE: PrecisionSetting.BFP8,
-                            TensorGroup.WO: PrecisionSetting.BFP8,
-                        },
-                        "OpFidelity": {
-                            OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16,
-                            OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
-                        },
-                    }
-                )
+                settings = {
+                    "TensorPrecision": {
+                        TensorGroup.WQKV: PrecisionSetting.BFP8,
+                        TensorGroup.KV_CACHE: PrecisionSetting.BFP8,
+                        TensorGroup.WO: PrecisionSetting.BFP8,
+                    },
+                    "OpFidelity": {
+                        OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2_FP16,
+                        OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
+                    },
+                }
+                if model_name.startswith("Phi-3-mini"): # TODO: Only do this for N150
+                    logger.info(
+                        f"Model {model_name} is running out of L1 memory under standard accuracy settings, using FP16 accumulate in attention prefill QKV Matmul"
+                    )
+                    settings["OpFidelity"][OpGroup.LI_QKV_PREFILL] = MathFidelitySetting.HIFI2_FP16
+                inst = cls(settings)
             else:
                 inst = cls(
                     {
@@ -162,12 +166,16 @@ class ModelOptimizations:
                 }
             )
         else:
-            inst = cls(
-                {
-                    "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP4},
-                    "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.LOFI},
-                }
-            )
+            settings = {
+                "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP4},
+                "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.LOFI},
+            }
+            if model_name.startswith("Phi-3-mini"): # TODO: Only do this for N150
+                logger.info(
+                    f"Model {model_name} is running out of L1 memory under standard high-performance settings, using FP16 accumulate in attention prefill QKV Matmul"
+                )
+                settings["OpFidelity"][OpGroup.LI_QKV_PREFILL] = MathFidelitySetting.HIFI2_FP16
+            inst = cls(settings)
         inst.__name__ = "performance"
         return inst
 
@@ -572,7 +580,7 @@ class ModelArgs:
                 "Qwen2.5-7B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Qwen2.5-72B": {"N150": None, "N300": None, "T3K": 32, "TG": 128, "P150x4": 128},
                 "Phi-3.5-mini-instruct": {"N150": 128, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
-                "Phi-3-mini-128k-instruct": {"N150": 1, "N300": 32, "T3K": 128, "TG": 128, "P150x4": 128},
+                "Phi-3-mini-128k-instruct": {"N150": 4, "N300": 32, "T3K": 128, "TG": 128, "P150x4": 128},
                 "QwQ-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
             }
             try:
@@ -597,7 +605,7 @@ class ModelArgs:
         if min_prefill_chunk_size_div1024 is None:
             # TODO Improve this to be more general to more devices and models
             MIN_PREFILL_CHUNK_SIZES_DIV1024 = {
-                "Phi-3-mini-128k-instruct": {"N150": 1, "N300": 2, "T3K": 2, "TG": 2, "P150x4": 2},
+                "Phi-3-mini-128k-instruct": {"N150": 2, "N300": 2, "T3K": 2, "TG": 2, "P150x4": 2},
             }
             try:
                 min_prefill_chunk_size_div1024 = MIN_PREFILL_CHUNK_SIZES_DIV1024[self.base_model_name][self.device_name]
