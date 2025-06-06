@@ -133,7 +133,10 @@ def test_model_inference(
     # This sets the minimum PCC for each iteration based on optimization mode
     # TODO: See issue https://github.com/tenstorrent/tt-metal/issues/19806
     perf_out_pcc_map = {"Mistral-7B-Instruct-v0.3": 0.73}
-    acc_out_pcc_map = {"Mistral-7B-Instruct-v0.3": 0.75}
+    acc_out_pcc_map = {
+        "Mistral-7B-Instruct-v0.3": 0.75,
+        "Phi-3-mini-128k-instruct": 0.89 # Only low for seq_len=128 case
+    }
     kv_cache_pcc_map = {"Mistral-7B-Instruct-v0.3": 0.75}
 
     if num_layers == 1:
