@@ -477,10 +477,17 @@ def test_demo_text(
         pytest.skip("TG only supports batch 1 and 32")
 
     model_name_env = os.getenv("HF_MODEL")
-    if (model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower()) and os.environ.get("MESH_DEVICE") == "N150" and ("long-context-64k" in test_id or "long-context-32k" in test_id or "ci-stress-1" in test_id):
-        pytest.skip("Skipping 64k and 32k long context test for Phi-3-mini-128-instruct on device N150")
-    if (model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower()) and os.environ.get("MESH_DEVICE") == "N300" and ("long-context-64k" in test_id or "ci-stress-1" in test_id):
-        pytest.skip("Skipping 64k long context test for Phi-3-mini-128-instruct on device N300")
+    if model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower():
+        max_context_per_device = {
+            "N150": 32 * 1024,
+            "N300": 64 * 1024,
+        }
+        device_name = os.environ.get("MESH_DEVICE")
+        max_context_supported = max_context_per_device.get(device_name, 128 * 1024)
+        if max_context_supported < max_seq_len:
+            pytest.skip(
+                f"Max sequence length: {max_seq_len} not supported for model: {model_name_env} on device: {device_name}"
+            )
 
     enable_trace = True  # Use tracing for better perf
     print_to_file = False  # Enable this flag to print the output of all users to a file

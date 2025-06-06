@@ -98,7 +98,7 @@ def test_model_inference(
     cache_pcc = True  # Flag to measure KV cache PCC for all layers
 
     model_name_env = os.getenv("HF_MODEL")
-    if model_name_env and model_name_env in ["Mistral-7B", "Phi-3-mini-128k-instruct"]:
+    if model_name_env and (("Mistral-7B" in model_name_env) or ("Phi-3-mini-128k-instruct" in model_name_env)):
         # TODO: Per layer KV cache fetching is not implemented yet. See issue https://github.com/tenstorrent/tt-metal/issues/19806"
         cache_pcc = False
 

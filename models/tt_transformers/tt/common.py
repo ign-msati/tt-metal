@@ -183,12 +183,6 @@ def apply_scaling(freqs: torch.Tensor, scale_factor: float, orig_context_len: in
     return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
 
-def apply_scaling_tensor(freqs: torch.Tensor, scale_factor: torch.Tensor):
-    # Phi3 specific scaling (LongRoPE)
-    assert freqs.shape[-1] == scale_factor.shape[-1]
-    return freqs / scale_factor
-
-
 def precompute_freqs(dim: int, end: int, theta, scale_factor, orig_context_len, ext_scaling_tensor=None):
     """
     Precompute the frequency tensor for sine and cosine values with given dimensions.
@@ -206,7 +200,8 @@ def precompute_freqs(dim: int, end: int, theta, scale_factor, orig_context_len, 
     if scale_factor is not None:
         if ext_scaling_tensor is not None:
             # Phi3 specific scaling (LongRoPE)
-            freqs = apply_scaling_tensor(freqs, ext_scaling_tensor)
+            assert freqs.shape[-1] == ext_scaling_tensor.shape[-1]
+            freqs = freqs / ext_scaling_tensor
             freqs = torch.outer(t, freqs).float()
             return torch.cos(freqs) * scale_factor, torch.sin(freqs) * scale_factor
         else:
@@ -240,9 +235,16 @@ def gather_cos_sin(position_ids, cos, sin):
     return cos, sin
 
 
-def get_prefill_rot_mat(head_dim, mesh_device, seq_len, theta, scale_factor, orig_context_len, start_pos=0, ext_scaling_tensor=None):
+def get_prefill_rot_mat(
+    head_dim, mesh_device, seq_len, theta, scale_factor, orig_context_len, start_pos=0, ext_scaling_tensor=None
+):
     cos, sin = precompute_freqs(
-        head_dim, seq_len * 2, theta=theta, scale_factor=scale_factor, orig_context_len=orig_context_len, ext_scaling_tensor=ext_scaling_tensor
+        head_dim,
+        seq_len * 2,
+        theta=theta,
+        scale_factor=scale_factor,
+        orig_context_len=orig_context_len,
+        ext_scaling_tensor=ext_scaling_tensor,
     )
     cos_gathered, sin_gathered = gather_cos_sin(torch.arange(start_pos, start_pos + seq_len), cos, sin)
     assert cos_gathered.size() == (1, 1, seq_len, head_dim)
@@ -447,15 +449,15 @@ def nearest_pow_2(x):
     return 2 ** math.ceil(math.log2(x))
 
 
-def get_max_prefill_chunk_size(seq_len, max_prefill_seq_len, min_chunk_size=None):
+def get_max_prefill_chunk_size(seq_len, max_prefill_seq_len):
     """
-    Determine the largest multiple of min_chunk_size or default : 2048 that divides `seq_len` and is less than or equal to `max_prefill_seq_len`.
+    Determine the largest multiple of 2048 that divides `seq_len` and is less than or equal to `max_prefill_seq_len`.
 
     **Assumptions**:
-    - `seq_len` is a multiple of min_chunk_size or default:2048.
-    - `max_prefill_seq_len` is a multiple of min_chunk_size or default:2048.
+    - `seq_len` is a multiple of 2048.
+    - `max_prefill_seq_len` is a multiple of 2048.
     """
-    MIN_CHUNK_SIZE = 2048 if min_chunk_size is None else min_chunk_size
+    MIN_CHUNK_SIZE = 2048
 
     if not isinstance(seq_len, int) or not isinstance(max_prefill_seq_len, int):
         raise TypeError("Both seq_len and max_prefill_seq_len must be integers.")

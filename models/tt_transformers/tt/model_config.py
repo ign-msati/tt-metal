@@ -96,7 +96,11 @@ class ModelOptimizations:
                 }
             )
         else:
-            if model_name.startswith("Llama3") or model_name.startswith("Mistral-7B") or model_name.startswith("Phi-3-mini"):
+            if (
+                model_name.startswith("Llama3")
+                or model_name.startswith("Mistral-7B")
+                or model_name.startswith("Phi-3-mini")
+            ):
                 logger.info(
                     f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
                 )
@@ -111,7 +115,7 @@ class ModelOptimizations:
                         OpGroup.LI_FF2: MathFidelitySetting.HIFI2_FP16,
                     },
                 }
-                if model_name.startswith("Phi-3-mini"): # TODO: Only do this for N150
+                if model_name.startswith("Phi-3-mini"):  # TODO: Only do this for N150
                     logger.info(
                         f"Model {model_name} is running out of L1 memory under standard accuracy settings, using FP16 accumulate in attention prefill QKV Matmul"
                     )
@@ -170,7 +174,7 @@ class ModelOptimizations:
                 "TensorPrecision": {TensorGroup.FF1_FF3: PrecisionSetting.BFP4},
                 "OpFidelity": {OpGroup.LI_FF1_FF3: MathFidelitySetting.LOFI},
             }
-            if model_name.startswith("Phi-3-mini"): # TODO: Only do this for N150
+            if model_name.startswith("Phi-3-mini"):  # TODO: Only do this for N150
                 logger.info(
                     f"Model {model_name} is running out of L1 memory under standard high-performance settings, using FP16 accumulate in attention prefill QKV Matmul"
                 )
@@ -433,8 +437,6 @@ class ModelArgs:
         self.mesh_device = mesh_device
         self.arch_name = ttnn.get_arch_name()
         self.dram_grid_size = mesh_device.dram_grid_size() if mesh_device else None  # CoreCoord with (x, y)
-        self.fuse_qkv = False
-        self.fuse_mlp = False
 
         if self.num_devices == 0:
             self.device_name = "CPU"
@@ -468,6 +470,8 @@ class ModelArgs:
         self.tile_size = 32
         self.is_70b = False
         self.is_90b = False
+        self.fuse_qkv = False
+        self.fuse_mlp = False
         self.from_hf_url = False  # updated below if true
         self.prefill_len_cutoff = 512 if is_blackhole() else 1024
         # TODO the following is parametrized for a vocab size of 128256 (used in LLama3). Should generalize for other models
@@ -580,7 +584,7 @@ class ModelArgs:
                 "Qwen2.5-7B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Qwen2.5-72B": {"N150": None, "N300": None, "T3K": 32, "TG": 128, "P150x4": 128},
                 "Phi-3.5-mini-instruct": {"N150": 128, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
-                "Phi-3-mini-128k-instruct": {"N150": 4, "N300": 32, "T3K": 128, "TG": 128, "P150x4": 128},
+                "Phi-3-mini-128k-instruct": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "QwQ-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
             }
             try:
@@ -599,30 +603,6 @@ class ModelArgs:
         else:
             max_prefill_chunk_size_div1024 = int(max_prefill_chunk_size_div1024)
         self.max_prefill_chunk_size = max_prefill_chunk_size_div1024 * 1024
-
-        # Set the min number of tokens for each prefill chunk based on the model and device
-        min_prefill_chunk_size_div1024 = os.getenv("MIN_PREFILL_CHUNK_SIZE")
-        if min_prefill_chunk_size_div1024 is None:
-            # TODO Improve this to be more general to more devices and models
-            MIN_PREFILL_CHUNK_SIZES_DIV1024 = {
-                "Phi-3-mini-128k-instruct": {"N150": 2, "N300": 2, "T3K": 2, "TG": 2, "P150x4": 2},
-            }
-            try:
-                min_prefill_chunk_size_div1024 = MIN_PREFILL_CHUNK_SIZES_DIV1024[self.base_model_name][self.device_name]
-            except KeyError:
-                logger.warning(
-                    f"Model {self.model_name} on device {self.device_name}, setting MIN_PREFILL_CHUNK_SIZE to 2 for compatibility"
-                )
-                min_prefill_chunk_size_div1024 = 2
-            assert (
-                min_prefill_chunk_size_div1024 is not None
-            ), f"Unsupported model {self.model_name} on device {self.device_name}"
-        else:
-            min_prefill_chunk_size_div1024 = int(min_prefill_chunk_size_div1024)
-        self.min_prefill_chunk_size = min_prefill_chunk_size_div1024 * 1024
-        assert (
-                self.min_prefill_chunk_size <= self.max_prefill_chunk_size
-            ), f"Min prefill chunk size {self.min_prefill_chunk_size} should not be greater than Max prefill chunk size {self.max_prefill_chunk_size}"
 
         if callable(optimizations):
             self.optimizations = optimizations(self)
@@ -2008,7 +1988,8 @@ class ModelArgs:
             # Add meta-compatible stop token list to the HF tokenizer
             if not "stop_tokens" in tokenizer.__dict__:
                 tokenizer.stop_tokens = [tokenizer.eos_token_id]
-                if "Phi-3-mini" in self.base_model_name.lower():
+                # Phi-3-mini uses "<|end|>" as EOS token
+                if "phi-3-mini" in self.base_model_name.lower():
                     tokenizer.stop_tokens.append(tokenizer.encode("<|end|>")[0])
             return tokenizer
 
@@ -2092,7 +2073,9 @@ class ModelArgs:
             model = self.reference_transformer(wrap=False)
             layer = model.model.layers[0].mlp
             layer._load_state_dict = layer.load_state_dict
-            layer.load_state_dict = lambda x: layer._load_state_dict(convert_meta_to_hf(x, self.head_dim))
+            layer.load_state_dict = lambda x: layer._load_state_dict(
+                convert_meta_to_hf(x, self.head_dim, fuse_mlp=self.fuse_mlp)
+            )
             return layer
 
     def reference_embedding(self, reference_model=None):

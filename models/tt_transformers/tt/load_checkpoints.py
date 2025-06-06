@@ -259,29 +259,38 @@ def fuse_mlp_meta(state_dict):
 
 
 def fuse_qkv_meta(state_dict):
-    key_map = {
-        "w_query": "wq.weight",
-        "w_key": "wk.weight",
-        "w_value": "wv.weight",
-        # fused qkv mapping
-        "w_fused": "wqkv.weight",
-    }
-
-    wq_list = sorted(list(filter(lambda x: key_map["w_query"] in x, state_dict.keys())))
-    wk_list = sorted(list(filter(lambda x: key_map["w_key"] in x, state_dict.keys())))
-    wv_list = sorted(list(filter(lambda x: key_map["w_value"] in x, state_dict.keys())))
+    # Weight keys list
+    wq_list = sorted(list(filter(lambda x: "wq.weight" in x, state_dict.keys())))
+    wk_list = sorted(list(filter(lambda x: "wk.weight" in x, state_dict.keys())))
+    wv_list = sorted(list(filter(lambda x: "wv.weight" in x, state_dict.keys())))
+    # Bias keys list
+    wq_bias_list = sorted(list(filter(lambda x: "wq.bias" in x, state_dict.keys())))
+    wk_bias_list = sorted(list(filter(lambda x: "wk.bias" in x, state_dict.keys())))
+    wv_bias_list = sorted(list(filter(lambda x: "wv.bias" in x, state_dict.keys())))
 
     for wq_key, wk_key, wv_key in zip(wq_list, wk_list, wv_list):
         wq = state_dict[wq_key]
         wk = state_dict[wk_key]
         wv = state_dict[wv_key]
 
-        prefix = wq_key[: -len(key_map["w_query"])]
-
-        fused_qkv = torch.vstack((wq, wk, wv))
-        state_dict[f"{prefix}{key_map['w_fused']}"] = fused_qkv
+        prefix = wq_key[: -len("wq.weight")]
+        fused_qkv_weights = torch.vstack((wq, wk, wv))
+        state_dict[f"{prefix}wqkv.weight"] = fused_qkv_weights
 
         del state_dict[wq_key], state_dict[wk_key], state_dict[wv_key]
+
+    # Checking for bias
+    if len(wq_bias_list) > 0:
+        for wq_bias_key, wk_bias_key, wv_bias_key in zip(wq_bias_list, wk_bias_list, wv_bias_list):
+            wq_bias = state_dict[wq_bias_key]
+            wk_bias = state_dict[wk_bias_key]
+            wv_bias = state_dict[wv_bias_key]
+
+            prefix = wq_bias_key[: -len("wq.bias")]
+            fused_qkv_bias = torch.vstack((wq_bias, wk_bias, wv_bias))
+            state_dict[f"{prefix}wqkv.bias"] = fused_qkv_bias
+
+            del state_dict[wq_bias_key], state_dict[wk_bias_key], state_dict[wv_bias_key]
 
     return state_dict
 
@@ -315,6 +324,7 @@ def map_meta_to_hf_keys(loaded_weights):
         "attention.wk.bias": "self_attn.k_proj.bias",
         "attention.wv.bias": "self_attn.v_proj.bias",
         "attention.wqkv.weight": "self_attn.qkv_proj.weight",
+        "attention.wqkv.bias": "self_attn.qkv_proj.bias",
         # Feed forward module
         "feed_forward.w1.weight": "mlp.gate_proj.weight",
         "feed_forward.w3.weight": "mlp.up_proj.weight",
@@ -334,6 +344,7 @@ def map_meta_to_hf_keys(loaded_weights):
         "wv.bias": "v_proj.bias",
         # fused qkv mapping
         "wqkv.weight": "qkv_proj.weight",
+        "wqkv.bias": "qkv_proj.bias",
         # Host embeddings
         "emb.weight": "weight",
     }

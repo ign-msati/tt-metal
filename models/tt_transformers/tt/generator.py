@@ -133,8 +133,7 @@ class Generator:
             assert (
                 last_token_idx is not None and last_token_idx < seq_len
             ), "last_token_idx must be provided and less than seq_len"
-            min_prefill_chunk_size = self.model_args[model_id].min_prefill_chunk_size if (hasattr(self.model_args[model_id], 'min_prefill_chunk_size')) else None
-            chunk_size = get_max_prefill_chunk_size(seq_len, self.model_args[model_id].max_prefill_chunk_size, min_prefill_chunk_size)
+            chunk_size = get_max_prefill_chunk_size(seq_len, self.model_args[model_id].max_prefill_chunk_size)
             block_size = get_block_size(kv_cache)
             last_token_idx_in_chunk = last_token_idx % chunk_size
             # Calculate which chunk contains the last_token_idx
