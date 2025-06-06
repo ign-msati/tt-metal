@@ -96,9 +96,9 @@ class ModelOptimizations:
                 }
             )
         else:
-            if model_name.startswith("Llama3") or model_name.startswith("Mistral-7B"):
+            if model_name.startswith("Llama3") or model_name.startswith("Mistral-7B") or model_name.startswith("Phi-3-mini"):
                 logger.info(
-                    f"Llama 3 and Mistral 7B models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
+                    f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
                 )
                 inst = cls(
                     {
@@ -591,6 +591,30 @@ class ModelArgs:
         else:
             max_prefill_chunk_size_div1024 = int(max_prefill_chunk_size_div1024)
         self.max_prefill_chunk_size = max_prefill_chunk_size_div1024 * 1024
+
+        # Set the min number of tokens for each prefill chunk based on the model and device
+        min_prefill_chunk_size_div1024 = os.getenv("MIN_PREFILL_CHUNK_SIZE")
+        if min_prefill_chunk_size_div1024 is None:
+            # TODO Improve this to be more general to more devices and models
+            MIN_PREFILL_CHUNK_SIZES_DIV1024 = {
+                "Phi-3-mini-128k-instruct": {"N150": 1, "N300": 2, "T3K": 2, "TG": 2, "P150x4": 2},
+            }
+            try:
+                min_prefill_chunk_size_div1024 = MIN_PREFILL_CHUNK_SIZES_DIV1024[self.base_model_name][self.device_name]
+            except KeyError:
+                logger.warning(
+                    f"Model {self.model_name} on device {self.device_name}, setting MIN_PREFILL_CHUNK_SIZE to 2 for compatibility"
+                )
+                min_prefill_chunk_size_div1024 = 2
+            assert (
+                min_prefill_chunk_size_div1024 is not None
+            ), f"Unsupported model {self.model_name} on device {self.device_name}"
+        else:
+            min_prefill_chunk_size_div1024 = int(min_prefill_chunk_size_div1024)
+        self.min_prefill_chunk_size = min_prefill_chunk_size_div1024 * 1024
+        assert (
+                self.min_prefill_chunk_size <= self.max_prefill_chunk_size
+            ), f"Min prefill chunk size {self.min_prefill_chunk_size} should not be greater than Max prefill chunk size {self.max_prefill_chunk_size}"
 
         if callable(optimizations):
             self.optimizations = optimizations(self)
@@ -1976,6 +2000,8 @@ class ModelArgs:
             # Add meta-compatible stop token list to the HF tokenizer
             if not "stop_tokens" in tokenizer.__dict__:
                 tokenizer.stop_tokens = [tokenizer.eos_token_id]
+                if "Phi-3-mini" in self.base_model_name.lower():
+                    tokenizer.stop_tokens.append(tokenizer.encode("<|end|>")[0])
             return tokenizer
 
     def encode_prompt(self, prompt_text, system_prompt_text=None, instruct=True):

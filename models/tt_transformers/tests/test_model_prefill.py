@@ -98,7 +98,7 @@ def test_model_inference(
     cache_pcc = True  # Flag to measure KV cache PCC for all layers
 
     model_name_env = os.getenv("HF_MODEL")
-    if model_name_env and "Mistral-7B" in model_name_env:
+    if model_name_env and model_name_env in ["Mistral-7B", "Phi-3-mini-128k-instruct"]:
         # TODO: Per layer KV cache fetching is not implemented yet. See issue https://github.com/tenstorrent/tt-metal/issues/19806"
         cache_pcc = False
 
@@ -194,7 +194,7 @@ def test_model_inference(
             )
         }
         reference_model = model_args.reference_transformer()
-        reference_model.load_state_dict(reference_state_dict)
+        reference_model.load_state_dict(reference_state_dict, model_args.fuse_qkv, model_args.fuse_mlp)
         # Embedding on host
         embd = model_args.reference_embedding()
         embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})

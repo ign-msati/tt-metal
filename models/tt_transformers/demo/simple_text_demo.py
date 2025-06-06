@@ -226,11 +226,11 @@ def prepare_generator_args(
             "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",  # input_prompts
             True,  # instruct mode
             1,  # repeat_batches
-            32 * 1024,  # max_seq_len
+            64 * 1024,  # max_seq_len
             1,  # batch_size
             200,  # max_generated_tokens
             True,  # paged_attention
-            {"page_block_size": 64, "page_max_num_blocks_per_dp": 2048},  # page_params
+            {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params
             {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
             True,  # stop_at_eos
             False,  # ci_only
@@ -244,7 +244,7 @@ def prepare_generator_args(
             1,  # batch_size
             200,  # max_generated_tokens
             True,  # paged_attention
-            {"page_block_size": 64, "page_max_num_blocks_per_dp": 2048},  # page_params
+            {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
             {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
             True,  # stop_at_eos
             False,  # ci_only
@@ -475,6 +475,12 @@ def test_demo_text(
     # TODO: Remove this once all batch sizes are supported on TG
     if os.environ.get("MESH_DEVICE") == "TG" and batch_size not in [1, 32]:
         pytest.skip("TG only supports batch 1 and 32")
+
+    model_name_env = os.getenv("HF_MODEL")
+    if (model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower()) and os.environ.get("MESH_DEVICE") == "N150" and ("long-context-64k" in test_id or "long-context-32k" in test_id or "ci-stress-1" in test_id):
+        pytest.skip("Skipping 64k and 32k long context test for Phi-3-mini-128-instruct on device N150")
+    if (model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower()) and os.environ.get("MESH_DEVICE") == "N300" and ("long-context-64k" in test_id or "ci-stress-1" in test_id):
+        pytest.skip("Skipping 64k long context test for Phi-3-mini-128-instruct on device N300")
 
     enable_trace = True  # Use tracing for better perf
     print_to_file = False  # Enable this flag to print the output of all users to a file
