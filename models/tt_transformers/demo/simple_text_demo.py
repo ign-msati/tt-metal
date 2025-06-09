@@ -476,19 +476,6 @@ def test_demo_text(
     if os.environ.get("MESH_DEVICE") == "TG" and batch_size not in [1, 32]:
         pytest.skip("TG only supports batch 1 and 32")
 
-    model_name_env = os.getenv("HF_MODEL")
-    if model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower():
-        max_context_per_device = {
-            "N150": 32 * 1024,
-            "N300": 64 * 1024,
-        }
-        device_name = os.environ.get("MESH_DEVICE")
-        max_context_supported = max_context_per_device.get(device_name, 128 * 1024)
-        if max_context_supported < max_seq_len:
-            pytest.skip(
-                f"Max sequence length: {max_seq_len} not supported for model: {model_name_env} on device: {device_name}"
-            )
-
     enable_trace = True  # Use tracing for better perf
     print_to_file = False  # Enable this flag to print the output of all users to a file
 
@@ -524,6 +511,18 @@ def test_demo_text(
 
     num_devices = mesh_device.get_num_devices() if isinstance(mesh_device, ttnn.MeshDevice) else 1
     global_batch_size = batch_size * data_parallel  # input batch_size is interpreted as size per DP group
+
+    model_name_env = os.getenv("HF_MODEL", "")
+    if "phi-3-mini-128k-instruct" in model_name_env.lower():
+        max_context_per_device = {
+            1: 32 * 1024,
+            2: 64 * 1024,
+        }
+        max_context_supported = max_context_per_device.get(num_devices, 128 * 1024)
+        if max_context_supported < max_seq_len:
+            pytest.skip(
+                f"Max sequence length: {max_seq_len} not supported for model: {model_name_env} on device: {mesh_device}"
+            )
 
     # uneven split of devices per DP group not supported
     if data_parallel > num_devices or num_devices % data_parallel != 0:
