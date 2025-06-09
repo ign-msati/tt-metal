@@ -226,11 +226,11 @@ def prepare_generator_args(
             "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",  # input_prompts
             True,  # instruct mode
             1,  # repeat_batches
-            32 * 1024,  # max_seq_len
+            64 * 1024,  # max_seq_len
             1,  # batch_size
             200,  # max_generated_tokens
             True,  # paged_attention
-            {"page_block_size": 64, "page_max_num_blocks_per_dp": 2048},  # page_params
+            {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params
             {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
             True,  # stop_at_eos
             False,  # ci_only
@@ -244,7 +244,7 @@ def prepare_generator_args(
             1,  # batch_size
             200,  # max_generated_tokens
             True,  # paged_attention
-            {"page_block_size": 64, "page_max_num_blocks_per_dp": 2048},  # page_params
+            {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params
             {"temperature": 0, "top_p": 0.08},  # sampling_params (argmax)
             True,  # stop_at_eos
             False,  # ci_only
@@ -475,6 +475,19 @@ def test_demo_text(
     # TODO: Remove this once all batch sizes are supported on TG
     if os.environ.get("MESH_DEVICE") == "TG" and batch_size not in [1, 32]:
         pytest.skip("TG only supports batch 1 and 32")
+
+    model_name_env = os.getenv("HF_MODEL")
+    if model_name_env and "phi-3-mini-128k-instruct" in model_name_env.lower():
+        max_context_per_device = {
+            "N150": 32 * 1024,
+            "N300": 64 * 1024,
+        }
+        device_name = os.environ.get("MESH_DEVICE")
+        max_context_supported = max_context_per_device.get(device_name, 128 * 1024)
+        if max_context_supported < max_seq_len:
+            pytest.skip(
+                f"Max sequence length: {max_seq_len} not supported for model: {model_name_env} on device: {device_name}"
+            )
 
     enable_trace = True  # Use tracing for better perf
     print_to_file = False  # Enable this flag to print the output of all users to a file
