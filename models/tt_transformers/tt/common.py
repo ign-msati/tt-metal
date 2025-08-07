@@ -46,6 +46,7 @@ class RopeScalingType(str, Enum):
     # DYNAMIC = "dynamic"
     YARN = "yarn"
     LLAMA3 = "llama3"
+    PHI3 = "long_rope"
     DEFAULT = "default"
 
 
@@ -81,6 +82,14 @@ class RopeScalingYarn(RopeScaling):
     mscale_all_dim: Optional[float] = 0.0
 
 
+class RopeScalingPhi3(RopeScaling):
+    """RoPE scaling configuration for Phi3."""
+
+    # Phi3-specific parameters
+    long_factor: Optional[list]
+    short_factor: Optional[list]
+
+
 def rope_scaling_model_factory(rope_scaling_params: dict) -> RopeScaling:
     rope_scaling_type = rope_scaling_params.get("rope_type") or rope_scaling_params.get("type")
     if rope_scaling_type == RopeScalingType.LINEAR:
@@ -89,6 +98,8 @@ def rope_scaling_model_factory(rope_scaling_params: dict) -> RopeScaling:
         return RopeScalingLlama3(**rope_scaling_params)
     elif rope_scaling_type == RopeScalingType.YARN:
         return RopeScalingYarn(**rope_scaling_params)
+    elif rope_scaling_type == RopeScalingType.PHI3:
+        return RopeScalingPhi3(**rope_scaling_params)
     elif rope_scaling_type in ["default", "mrope"]:
         logger.warning(
             f"Rope scaling type was set to {rope_scaling_type}, defaulting to no rope scaling as this rope type is not supported yet by TTT"

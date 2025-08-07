@@ -245,6 +245,33 @@ class LlamaRotaryEmbedding(ScaledRotaryEmbedding):
         return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
 
+class Phi3RotaryEmbedding(RotaryEmbedding):
+    def __init__(
+        self,
+        dim: int,
+        max_position_embeddings: int,
+        base: float,
+        device: Optional[Any] = None,
+    ) -> None:
+        # self.scaling_factor = factor
+        # self.orig_context_len = original_max_position_embeddings
+        # self.ext_scaling_tensor = ext_scaling_tensor
+        super().__init__(dim, max_position_embeddings, base, device)
+
+    def _set_cos_sin_cache(self, seq_len: int, device: Any, dtype: torch.dtype) -> None:
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+
+        freqs = torch.outer(t, self.inv_freq.to(t.device))
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
+        cos, sin = self.permute_to_meta_format(cos, sin)
+        self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
+        self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
+
+
 def rotary_embedding_factory(
     dim: int,
     max_position_embeddings: int,
@@ -261,6 +288,9 @@ def rotary_embedding_factory(
             rotary_embedding = LlamaRotaryEmbedding
         elif rope_scaling.rope_type.value == "yarn":
             rotary_embedding = YarnRotaryEmbedding
+        elif rope_scaling.rope_type.value == "long_rope":
+            rotary_embedding = Phi3RotaryEmbedding
+            print(f"rope_scaling: {rope_scaling.model_dump()}")
         else:
             raise ValueError(f"Invalid rope_scaling: {rope_scaling}")
         return rotary_embedding(
