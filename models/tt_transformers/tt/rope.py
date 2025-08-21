@@ -245,7 +245,7 @@ class LlamaRotaryEmbedding(ScaledRotaryEmbedding):
         return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
 
-class Phi3RotaryEmbedding(RotaryEmbedding):
+class Phi3RotaryEmbedding(ScaledRotaryEmbedding):
     def __init__(
         self,
         dim: int,
@@ -259,77 +259,36 @@ class Phi3RotaryEmbedding(RotaryEmbedding):
         self.orig_context_len = original_max_position_embeddings
         self.long_factor = long_factor
         self.short_factor = short_factor
-        super().__init__(dim, max_position_embeddings, base, device)
+        scale = 1024 * 128 / self.orig_context_len # Specific for Phi-3-mini-128k 
+        if scale <= 1.0:
+            scaling_factor = 1.0
+        else:
+            scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.orig_context_len))
+        super().__init__(dim, max_position_embeddings, base, scaling_factor, device)
 
-    def _set_cos_sin_cache(self, seq_len: int, device: Any, dtype: torch.dtype) -> None:
-        self.max_seq_len_cached = seq_len
-
+    def apply_scaling(self, freqs: torch.Tensor) -> torch.Tensor:
         if self.max_seq_len_cached > self.orig_context_len:
             ext_factors = torch.tensor(self.long_factor, dtype=torch.float32)
         else:
             ext_factors = torch.tensor(self.short_factor, dtype=torch.float32)
+        assert freqs.shape[-1] == ext_factors.shape[-1]
+        return freqs / ext_factors
 
-        scale = self.max_seq_len_cached / self.orig_context_len
-        if scale <= 1.0:
-            self.scaling_factor = 1.0
-        else:
-            self.scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.orig_context_len))
-
-        inv_freq_shape = torch.arange(0, self.dim, 2).float().to(device) / self.dim
-        self.inv_freq = 1.0 / (ext_factors * self.base**inv_freq_shape)
+    def _set_cos_sin_cache(self, seq_len: int, device: Any, dtype: torch.dtype) -> None:
+        self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+        
+        inv_freq_shape = torch.arange(0, self.dim, 2).float().to(device) / self.dim
+        self.inv_freq = 1.0 / (self.base**inv_freq_shape)
+        self.inv_freq = self.apply_scaling(self.inv_freq)
         freqs = torch.outer(t, self.inv_freq.to(t.device))
-
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos() * self.scaling_factor
         sin = emb.sin() * self.scaling_factor
         cos, sin = self.permute_to_meta_format(cos, sin)
         self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
         self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
-
-
-# class Phi3RotaryEmbedding(ScaledRotaryEmbedding):
-#     def __init__(
-#         self,
-#         dim: int,
-#         max_position_embeddings: int,
-#         base: float,
-#         original_max_position_embeddings: int,
-#         long_factor: List[int],
-#         short_factor: List[int],
-#         device: Optional[Any] = None,
-#     ) -> None:
-#         self.orig_context_len = original_max_position_embeddings
-#         self.long_factor = long_factor
-#         self.short_factor = short_factor
-#         scale = max_position_embeddings / self.orig_context_len
-#         if scale <= 1.0:
-#             scaling_factor = 1.0
-#         else:
-#             scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.orig_context_len))
-#         super().__init__(dim, max_position_embeddings, base, scaling_factor, device)
-
-#     def apply_scaling(self, freqs: torch.Tensor) -> torch.Tensor:
-#         if self.max_seq_len_cached > self.orig_context_len:
-#             ext_factors = torch.tensor(self.long_factor, dtype=torch.float32)
-#         else:
-#             ext_factors = torch.tensor(self.short_factor, dtype=torch.float32)
-#         assert freqs.shape[-1] == ext_factors.shape[-1]
-#         return freqs / ext_factors
-
-#     def _set_cos_sin_cache(self, seq_len: int, device: Any, dtype: torch.dtype) -> None:
-#         self.max_seq_len_cached = seq_len
-#         freqs = 1.0 / (self.base ** (torch.arange(0, self.dim, 2)[: (self.dim // 2)].float() / self.dim))
-#         t = torch.arange(seq_len * 2.0)
-#         freqs = self.apply_scaling(freqs)
-#         freqs = torch.outer(t, freqs).float()
-#         cos = torch.cos(freqs) * self.scaling_factor
-#         sin = torch.sin(freqs) * self.scaling_factor
-#         cos, sin = gather_cos_sin(torch.arange(seq_len), cos, sin)
-
-#         self.register_buffer("cos_cached", cos.to(dtype), persistent=False)
-#         self.register_buffer("sin_cached", sin.to(dtype), persistent=False)
 
 
 def rotary_embedding_factory(
