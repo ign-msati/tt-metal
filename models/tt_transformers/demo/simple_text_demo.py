@@ -603,7 +603,7 @@ def test_demo_text(
     hf_dir = os.getenv("HF_MODEL", "")
     if "phi-3-mini-128k-instruct" in hf_dir.lower():
         max_context_supported = 32 * 1024 * num_devices
-        if (max_context_supported < max_seq_len) and (
+        if (max_context_supported < max_seq_len) or (
             max_context_supported < page_params["page_block_size"] * page_params["page_max_num_blocks_per_dp"]
         ):
             pytest.skip(
