@@ -600,16 +600,14 @@ def test_demo_text(
     num_devices = mesh_device.get_num_devices() if isinstance(mesh_device, ttnn.MeshDevice) else 1
     global_batch_size = batch_size * data_parallel  # input batch_size is interpreted as size per DP group
 
-    model_name_env = os.getenv("HF_MODEL", "")
-    if "phi-3-mini-128k-instruct" in model_name_env.lower():
-        max_context_per_device = {
-            1: 32 * 1024,
-            2: 64 * 1024,
-        }
-        max_context_supported = max_context_per_device.get(num_devices, 128 * 1024)
-        if max_context_supported < max_seq_len:
+    hf_dir = os.getenv("HF_MODEL", "")
+    if "phi-3-mini-128k-instruct" in hf_dir.lower():
+        max_context_supported = 32 * 1024 * num_devices
+        if (max_context_supported < max_seq_len) and (
+            max_context_supported < page_params["page_block_size"] * page_params["page_max_num_blocks_per_dp"]
+        ):
             pytest.skip(
-                f"Max sequence length: {max_seq_len} not supported for model: {model_name_env} on device: {mesh_device}"
+                f"Max sequence length: {max_seq_len} for batch: {batch_size} not supported for model: {hf_dir} on device: {mesh_device}"
             )
 
     # uneven split of devices per DP group not supported
