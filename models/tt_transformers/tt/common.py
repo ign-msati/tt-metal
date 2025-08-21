@@ -90,7 +90,9 @@ class RopeScalingPhi3(RopeScaling):
     short_factor: Optional[list]
 
 
-def rope_scaling_model_factory(rope_scaling_params: dict, original_max_context_len: Optional[int] = None) -> RopeScaling:
+def rope_scaling_model_factory(
+    rope_scaling_params: dict, original_max_context_len: Optional[int] = None
+) -> RopeScaling:
     rope_scaling_type = rope_scaling_params.get("rope_type") or rope_scaling_params.get("type")
     if rope_scaling_type == RopeScalingType.LINEAR:
         return RopeScalingLinear(**rope_scaling_params)

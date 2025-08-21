@@ -1510,7 +1510,11 @@ class ModelArgs:
 
         rope_scaling_params = text_config.get("rope_scaling", None)
         self.original_max_context_len = text_config.get("original_max_position_embeddings", None)
-        self.rope_scaling = rope_scaling_model_factory(rope_scaling_params, original_max_context_len=self.original_max_context_len) if rope_scaling_params else None
+        self.rope_scaling = (
+            rope_scaling_model_factory(rope_scaling_params, original_max_context_len=self.original_max_context_len)
+            if rope_scaling_params
+            else None
+        )
 
         self.query_pre_attn_scalar = text_config.get("query_pre_attn_scalar", None)
 
@@ -1623,8 +1627,7 @@ class ModelArgs:
                     f"Loading state param for dummy {self.model_name} from {self.LOCAL_HF_PARAMS[self.model_name]}"
                 )
                 self.hf_config = AutoConfig.from_pretrained(
-                    self.LOCAL_HF_PARAMS[self.model_name],
-                    trust_remote_code=self.trust_remote_code_hf
+                    self.LOCAL_HF_PARAMS[self.model_name], trust_remote_code=self.trust_remote_code_hf
                 )
             else:
                 self.hf_config = AutoConfig.from_pretrained(self.CKPT_DIR, trust_remote_code=self.trust_remote_code_hf)
@@ -2220,13 +2223,17 @@ class ModelArgs:
                 model = AutoModelForCausalLM.from_config(config, trust_remote_code=self.trust_remote_code_hf)
             else:
                 if self.cache_hf_flag and self.cached_hf_model is None:
-                    model = AutoModelForCausalLM.from_pretrained(self.CKPT_DIR, trust_remote_code=self.trust_remote_code_hf)
+                    model = AutoModelForCausalLM.from_pretrained(
+                        self.CKPT_DIR, trust_remote_code=self.trust_remote_code_hf
+                    )
                     self.cached_hf_model = model
                 elif self.cache_hf_flag and self.cached_hf_model is not None:
                     model = self.cached_hf_model
                 else:
                     # No caching - load fresh each time
-                    model = AutoModelForCausalLM.from_pretrained(self.CKPT_DIR, trust_remote_code=self.trust_remote_code_hf)
+                    model = AutoModelForCausalLM.from_pretrained(
+                        self.CKPT_DIR, trust_remote_code=self.trust_remote_code_hf
+                    )
                 # HACK: Assume that we want the language model layers only
                 if hasattr(model, "language_model"):
                     model.model = model.language_model

@@ -259,7 +259,7 @@ class Phi3RotaryEmbedding(ScaledRotaryEmbedding):
         self.orig_context_len = original_max_position_embeddings
         self.long_factor = long_factor
         self.short_factor = short_factor
-        scale = 1024 * 128 / self.orig_context_len # Specific for Phi-3-mini-128k 
+        scale = 1024 * 128 / self.orig_context_len  # Specific for Phi-3-mini-128k
         if scale <= 1.0:
             scaling_factor = 1.0
         else:
@@ -277,12 +277,12 @@ class Phi3RotaryEmbedding(ScaledRotaryEmbedding):
     def _set_cos_sin_cache(self, seq_len: int, device: Any, dtype: torch.dtype) -> None:
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
-        
+
         inv_freq_shape = torch.arange(0, self.dim, 2).float().to(device) / self.dim
         self.inv_freq = 1.0 / (self.base**inv_freq_shape)
         self.inv_freq = self.apply_scaling(self.inv_freq)
         freqs = torch.outer(t, self.inv_freq.to(t.device))
-        
+
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos() * self.scaling_factor
         sin = emb.sin() * self.scaling_factor
