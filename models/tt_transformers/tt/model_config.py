@@ -2295,11 +2295,10 @@ class ModelArgs:
         else:
             model = self.reference_transformer(wrap=False)
             layer = model.model.layers[0]
-            # TODO: Generalize for other HF models using custom code
-            if "phi-3-mini" in self.base_model_name.lower():
-                wrapper = HfDecoderWrapper(layer, self.head_dim, layer.self_attn.rotary_emb)
-            else:
-                wrapper = HfDecoderWrapper(layer, self.head_dim, model.model.rotary_emb)
+            use_position_embeddings = layer.__class__.__name__ != "Phi3DecoderLayer"
+            wrapper = HfDecoderWrapper(
+                layer, self.head_dim, model.model.rotary_emb if use_position_embeddings else None
+            )
             return wrapper
 
     def reference_attention(self):
@@ -2474,11 +2473,15 @@ class HfDecoderWrapper:
 
     def forward(self, x, start_pos, freqs_cis_i, mask=None):
         position_ids = torch.tensor([list(range(start_pos, start_pos + x.shape[1]))] * x.shape[0])
-        position_embeddings = self.rotary_emb(x, position_ids)
 
         if mask is not None:
             while len(mask.shape) < 4:
                 mask = mask.unsqueeze(0)
+
+        position_embeddings = None
+        if self.rotary_emb is not None:
+            position_embeddings = self.rotary_emb(x, position_ids)
+
         result = self.decoder.forward(
             x,
             position_embeddings=position_embeddings,
