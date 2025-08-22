@@ -119,7 +119,7 @@ This configuration uses bfp4 MLP FF1+FF3 for all models. **Batch_size=1 and pref
 
 | Model                     | Device | Speed (t/s/u) | TTFT (ms) |
 |---------------------------|--------|---------------|-----------|
-| Phi-3-mini-128k-instruct  | N300   | 25.2          | 10736     |
+| Phi-3-mini-128k-instruct  | N300   | 26            | 10072     |
 
 ## Short-Context, Batch-32
 
